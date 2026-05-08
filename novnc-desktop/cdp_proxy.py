@@ -6,7 +6,10 @@ CDP proxy for noVNC container.
 Chrome binds the CDP debugger to ::1 (IPv6 loopback) regardless of
 --remote-debugging-address, so this proxy makes it reachable from other containers.
 """
-import asyncio, re, urllib.request, threading
+import asyncio
+import re
+import urllib.request
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
