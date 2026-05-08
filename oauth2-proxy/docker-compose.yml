@@ -1,0 +1,37 @@
+services:
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: oauth2-proxy
+    restart: unless-stopped
+    command:
+      - --provider=google
+      - --client-id=${GOOGLE_CLIENT_ID}
+      - --client-secret=${GOOGLE_CLIENT_SECRET}
+      - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET}
+      - --redirect-url=https://control.claw.designflow.app/oauth2/callback
+      - --cookie-domain=claw.designflow.app
+      - --cookie-domain=.claw.designflow.app
+      - --whitelist-domain=claw.designflow.app
+      - --whitelist-domain=.claw.designflow.app
+      - --email-domain=*
+      - --authenticated-emails-file=/etc/oauth2-proxy/allowed-emails.txt
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --set-xauthrequest=true
+      - --pass-access-token=false
+      - --upstream=static://202
+      - --skip-provider-button=true
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      - --cookie-name=_oauth2_proxy_claw
+    volumes:
+      - ./allowed-emails.txt:/etc/oauth2-proxy/allowed-emails.txt:ro
+    networks:
+      - coolify
+      - hiclaw-net
+
+networks:
+  coolify:
+    external: true
+  hiclaw-net:
+    external: true

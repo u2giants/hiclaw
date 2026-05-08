@@ -1,0 +1,15 @@
+# Runtime logs
+*.log
+
+# Runtime workspace (large, runtime-generated data)
+workspace/
+
+# State tracking
+.state/
+
+# Actual secrets — use .env.example as the template
+.env
+
+# OS / editor
+.DS_Store
+*.swp
