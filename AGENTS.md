@@ -241,6 +241,18 @@ These exist on the server but are not in the repo and are not relevant to develo
 
 ---
 
+### bootstrap_clawtalk_plugin() deletes installs.json on every start
+
+**Looks like:** Deleting `installs.json` on every container start is destructive — it makes OpenClaw rebuild its entire plugin registry from scratch.
+
+**Actually:** This is required. The bootstrap creates the clawtalk bundled shim (`/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`) AFTER writing to `installs.json`. OpenClaw caches the plugin list in `installs.json` and won't rescan unless the file is absent or a version migration is detected. Without the deletion, the gateway starts with a cached `installs.json` that predates the shim and reports "plugin not found: clawtalk".
+
+**Why:** Ordering constraint — `installs.json` is written during the Python step, bundled shim is created during the bash step. Can't write the shim first because the shim copies from the npm package manifest which the Python step also modifies.
+
+**Do not change because:** Removing the `rm -f installs.json` line causes clawtalk to fail to load on every container restart with "plugin not found: clawtalk (stale config entry ignored)". OpenClaw regenerates `installs.json` correctly on fresh start — the rebuild adds ~1 second to startup time.
+
+---
+
 ### clawtalk plugin uses a CJS wrapper (index.cjs)
 
 **Looks like:** The plugin should load its standard `build/index.js` entry point.
@@ -347,7 +359,7 @@ docker exec hiclaw-manager bash -c 'echo "{\"kind\":\"gateway-restart\",\"pid\":
 
 **What happened:** The clawtalk npm plugin (for ClawTalk integration) loads correctly in the OpenClaw CLI but not in the running gateway. A CJS wrapper was created inside the hiclaw-manager container to fix the ESM/CJS incompatibility, but it lives on the container's overlay filesystem and is wiped on every container restart.
 
-**Status:** Partially resolved. The wrapper works while the container is running. It is recreated manually after restarts. Permanent fix (mounting from host or baking into `start-manager-agent.sh`) is pending.
+**Status:** Resolved (2026-05-08). `bootstrap_clawtalk_plugin()` in `start-manager-agent.sh` creates the bundled shim on every container start AND deletes `installs.json` so the gateway does a full plugin rescan and discovers the shim. `bot_connected ✓` verified.
 
 **Recovery after container restart:**
 ```bash
@@ -370,7 +382,7 @@ docker exec hiclaw-manager bash -c 'jq ".commands.restart = true" /root/manager-
 
 ## 15. Pending Work
 
-- [ ] **Bake clawtalk CJS wrapper into `start-manager-agent.sh`** so it is recreated automatically on every container start. Currently manual after each restart.
+- [x] **Clawtalk loads automatically on container start** — `bootstrap_clawtalk_plugin()` in `start-manager-agent.sh` creates the bundled shim and deletes `installs.json` so the gateway does a fresh plugin scan and discovers clawtalk. All critical checks pass (`bot_connected ✓`).
 - [ ] **Rebuild `ghcr.io/u2giants/novnc-desktop` image** — Chrome wrapper fix (pgrep guard) is applied to the running container in-place but the Dockerfile fix has not been built and pushed yet. Next push to `novnc-desktop/` will trigger this automatically.
 - [ ] **Mount clawtalk modifications from host** — instead of recreating them inside the container, mount the fixed files from `/worksp/hiclaw/workspace/` so they survive container restarts permanently.
 - [ ] **Move hiclaw-manager and hiclaw-controller to Coolify** — currently managed by keeper scripts. Low priority; scripts work reliably.

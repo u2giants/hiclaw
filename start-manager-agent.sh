@@ -1422,7 +1422,13 @@ JS
     if [ -d "${plugin_dir}/skills" ]; then
         cp -r "${plugin_dir}/skills" "${bundled_dir}/skills"
     fi
-    log "ClawTalk bootstrap completed"
+
+    # Delete installs.json so OpenClaw does a fresh plugin scan on the next gateway
+    # start and discovers the bundled shim created above. Without this, installs.json
+    # (written by the Python step before the shim exists) won't include clawtalk and
+    # the gateway reports "plugin not found: clawtalk" at startup.
+    rm -f "${installs_path}"
+    log "ClawTalk bootstrap completed (installs.json cleared for fresh plugin scan)"
 }
 
 bootstrap_whatsapp_plugin() {
