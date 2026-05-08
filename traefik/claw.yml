@@ -52,7 +52,7 @@ http:
       rule: "Host(`gateway.claw.designflow.app`)"
       entrypoints: [https]
       tls:
-        certResolver: letsencrypt
+        certResolver: letsencrypt-dns
       middlewares: [google-auth]
       service: hiclaw-gateway-svc
       priority: 10
