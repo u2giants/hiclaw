@@ -44,6 +44,8 @@ hiclaw/
 │   ├── Dockerfile               ← builds ghcr.io/u2giants/novnc-desktop
 │   ├── novnc-startup.sh         ← container startup: Chrome watchdog, CDP proxy
 │   └── cdp_proxy.py             ← WebSocket proxy Chrome port 9222→9223
+├── traefik/
+│   └── claw.yml                 ← Traefik dynamic config (copy of /data/coolify/proxy/dynamic/claw.yml)
 ├── oauth2-proxy/
 │   ├── docker-compose.yml       ← oauth2-proxy container config
 │   └── allowed-emails.txt       ← whitelist of Google accounts allowed in
@@ -107,6 +109,9 @@ Changes made to files outside our own directories (upstream merge conflict check
 **I need to change the OAuth gate (who can log in, redirect URL, cookie):**
 → Edit `oauth2-proxy/docker-compose.yml` → commit → manually restart oauth2-proxy on server: `cd /worksp/hiclaw/oauth2-proxy && docker compose up -d`
 
+**I need to add/change a Traefik routing rule:**
+→ Edit `traefik/claw.yml` → commit → apply: `docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml` (Traefik hot-reloads automatically, no restart needed)
+
 **I need to change hiclaw-manager startup behavior:**
 → Edit `start-manager-agent.sh` → commit → git pull on server → restart manager: `docker stop hiclaw-manager && ./manager-bootstrap-keeper.sh`
 
@@ -125,6 +130,7 @@ Changes made to files outside our own directories (upstream merge conflict check
 
 | Task | File to touch |
 |---|---|
+| Traefik routing rules | `traefik/claw.yml` → apply with `docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml` |
 | Chrome launch flags | `novnc-desktop/novnc-startup.sh` |
 | Chrome Dockerfile | `novnc-desktop/Dockerfile` |
 | CDP WebSocket proxy | `novnc-desktop/cdp_proxy.py` (edit in-place on server) |

@@ -1,0 +1,99 @@
+http:
+  middlewares:
+    google-auth:
+      forwardAuth:
+        address: "http://oauth2-proxy:4180"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - "X-Auth-Request-User"
+          - "X-Auth-Request-Email"
+
+  routers:
+    # HTTP -> HTTPS redirects
+    hiclaw-http:
+      rule: "Host(`claw.designflow.app`)"
+      entrypoints: [http]
+      middlewares: [redirect-to-https]
+      service: hiclaw-element-svc
+
+    hiclaw-control-http:
+      rule: "Host(`control.claw.designflow.app`)"
+      entrypoints: [http]
+      middlewares: [redirect-to-https]
+      service: hiclaw-control-svc
+
+    hiclaw-gateway-http:
+      rule: "Host(`gateway.claw.designflow.app`)"
+      entrypoints: [http]
+      middlewares: [redirect-to-https]
+      service: hiclaw-gateway-svc
+
+    # oauth2-proxy callback + sign-out (no auth middleware)
+    hiclaw-oauth2:
+      rule: "Host(`control.claw.designflow.app`) && PathPrefix(`/oauth2`)"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      service: oauth2-proxy-svc
+      priority: 30
+
+    # OpenClaw Control -- protected by Google auth
+    hiclaw-control:
+      rule: "Host(`control.claw.designflow.app`)"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      middlewares: [google-auth]
+      service: hiclaw-control-svc
+      priority: 10
+
+    # OpenClaw Gateway UI -- protected by Google auth
+    hiclaw-gateway:
+      rule: "Host(`gateway.claw.designflow.app`)"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      middlewares: [google-auth]
+      service: hiclaw-gateway-svc
+      priority: 10
+
+    # Element Web -- protected by Google auth
+    hiclaw-element:
+      rule: "Host(`claw.designflow.app`) && !PathPrefix(`/_matrix`) && !PathPrefix(`/_synapse`)"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      middlewares: [google-auth]
+      service: hiclaw-element-svc
+      priority: 10
+
+    # Matrix API -- NO auth middleware
+    hiclaw-matrix:
+      rule: "Host(`claw.designflow.app`) && (PathPrefix(`/_matrix`) || PathPrefix(`/_synapse`))"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      service: hiclaw-matrix-svc
+      priority: 20
+
+  services:
+    hiclaw-element-svc:
+      loadBalancer:
+        servers:
+          - url: "http://10.0.1.1:18088"
+    hiclaw-matrix-svc:
+      loadBalancer:
+        servers:
+          - url: "http://10.0.1.1:18080"
+    hiclaw-control-svc:
+      loadBalancer:
+        servers:
+          - url: "http://hiclaw-controller:18888"
+    hiclaw-gateway-svc:
+      loadBalancer:
+        servers:
+          - url: "http://hiclaw-manager:18799"
+    oauth2-proxy-svc:
+      loadBalancer:
+        servers:
+          - url: "http://oauth2-proxy:4180"
