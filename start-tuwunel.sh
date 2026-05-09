@@ -23,7 +23,7 @@ export CONDUWUIT_CACHE_CAPACITY_MODIFIER="${CONDUWUIT_CACHE_CAPACITY_MODIFIER:-2
 # worker/manager/human starts from a clean room state. See
 # hiclaw-controller LeaveAll*Rooms / DeleteRoom flows.
 export CONDUWUIT_DELETE_ROOMS_AFTER_LEAVE="${CONDUWUIT_DELETE_ROOMS_AFTER_LEAVE:-true}"
-export CONDUWUIT_FORGET_FORCED_UPON_LEAVE="${CONDUWUIT_FORGET_FORCED_UPON_LEAVE:-true}"
+export CONDUWUIT_FORGET_FORCED_UPON_LEAVE="${CONDUWUIT_FORGET_FORCED_UPON_LEAVE:-false}"
 
 # Native Matrix SSO: configure Google directly in Tuwunel so Element can use
 # Matrix-side SSO instead of a browser-side password or token workaround.
