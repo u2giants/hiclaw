@@ -83,13 +83,24 @@ try:
         changed = True
         print('clawtalk plugin entry added')
 
-    # Ensure WhatsApp plugin path/entry and baseline channel config are present.
+    # Raise per-file bootstrap char limit so AGENTS.md (15k+ chars) is not truncated.
+    agent_defaults = d.setdefault('agents', {}).setdefault('defaults', {})
+    if agent_defaults.get('bootstrapMaxChars') != 20000:
+        agent_defaults['bootstrapMaxChars'] = 20000
+        changed = True
+        print('agents.defaults.bootstrapMaxChars set to 20000')
+
+    # Ensure WhatsApp and ClawTalk are in the plugin allow list.
     whatsapp_path = '/root/manager-workspace/.openclaw/npm/node_modules/@openclaw/whatsapp'
     plugin_allow = d.setdefault('plugins', {}).setdefault('allow', [])
     if 'whatsapp' not in plugin_allow:
         plugin_allow.append('whatsapp')
         changed = True
         print('whatsapp plugin allow entry added')
+    if 'clawtalk' not in plugin_allow:
+        plugin_allow.append('clawtalk')
+        changed = True
+        print('clawtalk plugin allow entry added')
 
     if whatsapp_path not in load_paths:
         load_paths.append(whatsapp_path)
