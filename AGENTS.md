@@ -259,6 +259,20 @@ These exist on the server but are not in the repo and are not relevant to develo
 
 ---
 
+### openclaw updates require a container restart (hash-stamped modules)
+
+**Looks like:** Clicking "Update now" in the OpenClaw UI should update and restart the gateway in-place.
+
+**Actually:** OpenClaw builds its dist directory with content-hash-stamped filenames (Vite/Rollup output). When `openclaw update` installs a new version, those filenames change. The running process already has old paths cached in loaded module references — so the in-process restart (forced by `OPENCLAW_NO_RESPAWN=1`) silently fails to load the new files. The gateway keeps running with the old code; the "Update now" button immediately reverts.
+
+**Why:** Node.js module cache + `OPENCLAW_NO_RESPAWN=1` + hash-renamed files = stale references survive in-process restart. OpenClaw's own restart-after-update step also skips because it can't find a systemd service ("No installed gateway service found; skipped restart").
+
+**Prevention (implemented):** `start-manager-agent.sh` writes a hash of `/usr/lib/node_modules/openclaw/package.json` to `~/.openclaw-startup-pkg-hash` on each startup. The `manager-bootstrap-keeper.sh` (cron, every minute) reads this hash and compares it to the live package hash inside the running container. If they differ — indicating an in-container update ran — it calls `docker restart hiclaw-manager`, which starts fresh and loads the new module files correctly.
+
+**Do not change because:** Removing the startup hash write or the keeper check means updates silently break the sentinel, future "Update now" clicks hang, and `openclaw doctor` is required to recover.
+
+---
+
 ### clawtalk plugin uses a CJS wrapper (index.cjs)
 
 **Looks like:** The plugin should load its standard `build/index.js` entry point.

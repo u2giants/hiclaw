@@ -44,17 +44,35 @@ fi
 
 if [ "${container_hash}" = "${host_hash}" ] && [ "${last_container_id}" = "${container_id}" ]; then
     echo "startup patch already current for ${container_id}"
-    exit 0
+else
+    echo "applying manager startup patch to ${CONTAINER_NAME} (${container_id})"
+    docker cp "${HOST_SCRIPT}" "${CONTAINER_NAME}:${CONTAINER_SCRIPT}"
+    docker exec "${CONTAINER_NAME}" chmod 755 "${CONTAINER_SCRIPT}"
+    echo "${container_id}" > "${STATE_FILE}"
+
+    if [ "${container_hash}" != "${host_hash}" ]; then
+        echo "restarting ${CONTAINER_NAME} to activate patched startup script"
+        docker restart "${CONTAINER_NAME}" >/dev/null
+        exit 0
+    else
+        echo "container was recreated; patched script restored without additional changes"
+    fi
 fi
 
-echo "applying manager startup patch to ${CONTAINER_NAME} (${container_id})"
-docker cp "${HOST_SCRIPT}" "${CONTAINER_NAME}:${CONTAINER_SCRIPT}"
-docker exec "${CONTAINER_NAME}" chmod 755 "${CONTAINER_SCRIPT}"
-echo "${container_id}" > "${STATE_FILE}"
-
-if [ "${container_hash}" != "${host_hash}" ]; then
-    echo "restarting ${CONTAINER_NAME} to activate patched startup script"
-    docker restart "${CONTAINER_NAME}" >/dev/null
-else
-    echo "container was recreated; patched script restored without additional changes"
+# Detect openclaw in-container package updates and restart the container so
+# new hash-stamped module files are loaded fresh (in-process restarts don't
+# reload them — see Idiosyncratic Decision #5 in AGENTS.md).
+OPENCLAW_PKG="/usr/lib/node_modules/openclaw/package.json"
+STARTUP_HASH_FILE="/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash"
+if [ -f "${STARTUP_HASH_FILE}" ]; then
+    startup_pkg_hash="$(cat "${STARTUP_HASH_FILE}" 2>/dev/null || true)"
+    current_pkg_hash="$(
+        docker exec "${CONTAINER_NAME}" sha256sum "${OPENCLAW_PKG}" 2>/dev/null \
+            | cut -d' ' -f1 || true
+    )"
+    if [ -n "${startup_pkg_hash}" ] && [ -n "${current_pkg_hash}" ] \
+       && [ "${startup_pkg_hash}" != "${current_pkg_hash}" ]; then
+        echo "openclaw package changed since startup (${startup_pkg_hash:0:8} -> ${current_pkg_hash:0:8}); restarting to apply update"
+        docker restart "${CONTAINER_NAME}" >/dev/null
+    fi
 fi

@@ -1523,6 +1523,16 @@ else
     rm -rf "${HOME}/.openclaw/matrix" 2>/dev/null || true
     log "Cleaned Matrix crypto storage (will re-establish E2EE sessions)"
 
+    # Record openclaw package hash so the host-side bootstrap keeper can detect
+    # in-container updates and trigger a container restart (in-process restarts
+    # don't reload new hash-stamped module files — see Idiosyncratic Decision #5).
+    if [ -f /usr/lib/node_modules/openclaw/package.json ]; then
+        sha256sum /usr/lib/node_modules/openclaw/package.json \
+            | cut -d' ' -f1 \
+            > "${HOME}/.openclaw-startup-pkg-hash" 2>/dev/null || true
+        log "Recorded openclaw package hash for update detection"
+    fi
+
     # Launch OpenClaw
     # Disable full-process respawn so the CLI uses its internal restart loop.
     # Without this, config reload spawns a detached child and exits, then
