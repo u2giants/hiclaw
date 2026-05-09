@@ -109,7 +109,25 @@ cd /worksp/hiclaw/oauth2-proxy
 docker compose up -d
 ```
 
-This repo currently stores the proxy configuration directly in `docker-compose.yml`. Treat that file as live deployment config, not a template.
+`docker-compose.yml` is live deployment config, not a template. Credentials are read from `oauth2-proxy/.env` (not committed to the repo).
+
+### Authentication provider: Authentik
+
+As of 2026-05-09, `oauth2-proxy` authenticates via Authentik (company OIDC IdP) instead of Google. Users must have an account in Authentik — which is populated from Active Directory via LDAP sync.
+
+| Setting | Value |
+|---------|-------|
+| Provider | `oidc` |
+| OIDC issuer | `https://auth.designflow.app/application/o/hiclaw/` |
+| Client type | confidential |
+| Redirect URI | `https://control.claw.designflow.app/oauth2/callback` |
+| Allowed emails | controlled by `oauth2-proxy/allowed-emails.txt` |
+
+Login flow: visiting `control.claw.designflow.app` triggers an oauth2-proxy redirect to `auth.designflow.app`. The user authenticates with their AD credentials there and is redirected back. The proxy sets a `_oauth2_proxy_claw` cookie valid for 7 days.
+
+**To update which email addresses are permitted:** edit `oauth2-proxy/allowed-emails.txt` and run `docker compose up -d --force-recreate` from `oauth2-proxy/`.
+
+**To rotate credentials:** update `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` in `oauth2-proxy/.env`, get new values from the Authentik admin UI at `https://auth.designflow.app` → Applications → HiClaw → Provider.
 
 ## Release/Change Management
 

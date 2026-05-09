@@ -22,7 +22,9 @@ This repo is a host-ops wrapper around a running HiClaw deployment. It does not 
   - `controller-bootstrap-keeper.sh` re-applies the patched Element Web startup script after controller recreation.
   - `mcp-keeper.sh` restores the browser MCP block when needed.
 - `oauth2-proxy`
-  - Protects `control.claw.designflow.app`.
+  - Protects `control.claw.designflow.app` and `gateway.claw.designflow.app`.
+  - Authenticates users via Authentik (self-hosted OIDC IdP at `auth.designflow.app`).
+  - Previously used Google OAuth; switched to Authentik 2026-05-09 so all logins go through the company AD.
 - noVNC / Playwright MCP path
   - Separate browser automation path documented in [novnc-setup.md](/worksp/hiclaw/novnc-setup.md).
 
@@ -112,5 +114,5 @@ This repo is a host-ops wrapper around a running HiClaw deployment. It does not 
 
 - `fix-element-config.sh` patches `hiclaw-controller`, manager npm/mc wrappers, nginx config, and Docker network attachments after upgrades.
 - `start-element-web.sh` and `controller-bootstrap-keeper.sh` are the persistent repair path for the controller-side chat UI startup.
-- `oauth2-proxy/docker-compose.yml` defines the control UI auth sidecar.
+- `oauth2-proxy/docker-compose.yml` defines the control UI auth sidecar. Provider is `oidc` pointed at `https://auth.designflow.app/application/o/hiclaw/`. Credentials are in `oauth2-proxy/.env` (not committed).
 - `novnc-setup.md` covers the browser/CDP path and the separate network dependency for the manager container.

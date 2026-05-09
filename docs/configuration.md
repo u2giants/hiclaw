@@ -240,7 +240,7 @@ This repo does not define the full HiClaw environment model. It only relies on a
 
 - ClawTalk server URL defaults to `https://clawdtalk.com`
 - browser MCP CDP endpoint defaults to `http://10.0.5.4:9223`
-- `oauth2-proxy` config is hardcoded in `oauth2-proxy/docker-compose.yml`
+- `oauth2-proxy` OIDC provider and redirect URI are in `oauth2-proxy/docker-compose.yml`; client credentials (client ID, client secret, cookie secret) are in `oauth2-proxy/.env` (not committed)
 
 ## Cron Configuration
 
