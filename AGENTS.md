@@ -187,15 +187,17 @@ These exist on the server but are not in the repo and are not relevant to develo
 
 ## 11. Idiosyncratic Decisions
 
-### OpenClaw commands.restart stays true
+### manager-config-keeper.sh always writes commands:{}
 
-**Looks like:** `commands.restart=true` in `openclaw.json` is a bug — it looks like the gateway is being told to restart constantly.
+**Looks like:** The keeper is destroying the controller's `commands` configuration by resetting it to `{}`.
 
-**Actually:** This is the stable state. The hiclaw-controller reconciliation loop always writes `commands.restart=true`. OpenClaw only triggers a restart when the value *changes* from false→true. Once it's true, subsequent writes of true are a no-op.
+**Actually:** This is intentional and required to stop the 5-minute restart loop. The controller writes its template to the shared openclaw.json every ~5 minutes, including fields like `commands: {restart:true, native:"auto", nativeSkills:"auto", ownerDisplay:"raw"}`. It also writes an invalid matrix groups schema (`allow: true` instead of `enabled: true`) that causes the gateway to skip the reload. When the keeper fixes the schema and writes back — preserving the controller's `commands` content — the gateway detects `commands` changed (running state is `{}`, file has controller's content) and triggers a restart.
 
-**Why:** The controller uses this field as a one-shot "restart now" signal. It always writes true; OpenClaw level-triggers only on the false→true edge.
+**Why:** After the gateway processes the initial `commands.restart=true` signal on startup, it clears `commands` to `{}`. By ensuring the file also has `commands: {}`, the keeper's schema-fix write never changes `commands`. The gateway reloads without restarting.
 
-**Do not change because:** Setting it to false triggers one unnecessary restart (the diff false→true causes OpenClaw to restart), then it reverts to true anyway. If it somehow gets stuck in an oscillating loop, see Critical Incident Log #1.
+**Do not change because:** Restoring the `commands` fields from the controller's template causes "config change requires gateway restart (commands)" every 5 minutes, dropping all WebSocket connections. See Critical Incident Log #2.
+
+**Startup safety:** The startup script sets `commands.restart=true` to force the initial in-process reload. The gateway processes this within seconds. The keeper's 60-second cron window means the keeper never fires before the startup restart completes — it would always see `commands: {}` already cleared.
 
 ---
 
@@ -340,7 +342,7 @@ All variable names are in `.env.example`. Real values are never committed. Sourc
 
 **Root cause:** `start-manager-agent.sh` was setting `commands.restart = false` unconditionally at startup. The controller reconciliation loop then wrote `true`, triggering a restart. After restart, the script ran again, set it to false again — infinite loop.
 
-**Fix:** Lines 710 and 785 of `start-manager-agent.sh` changed to `.commands.restart = (.commands.restart // false)` — preserves existing `true`, only defaults to `false` if the key is missing.
+**Fix:** Lines 710 and 785 of `start-manager-agent.sh` changed to set `commands.restart = true` unconditionally at startup (not false). The controller's subsequent write of `true` is a no-op (no false→true edge). `manager-config-keeper.sh` normalizes `commands: {}` to prevent the commands-change restart cascade — see Incident 2.
 
 **Rule:** Never set `commands.restart=false` in `openclaw.json`. See Idiosyncratic Decision #1.
 
@@ -359,7 +361,25 @@ docker exec hiclaw-manager bash -c 'echo "{\"kind\":\"gateway-restart\",\"pid\":
 
 ---
 
-### Incident 2 — Chrome double-instance OOM crash (2026-05-08)
+### Incident 2 — 5-minute OpenClaw restart loop (commands normalization) (2026-05-09)
+
+**What happened:** hiclaw-manager gateway restarted with code 1012 every ~5 minutes, dropping all WebSocket connections. The container uptime remained high (the restarts were in-process), but Matrix sessions were disrupted ~12 times per hour.
+
+**Root cause:** Two compounding bugs:
+1. The controller writes its template to the shared `openclaw.json` every ~5 minutes. The template has `channels.matrix.groups["*"]: {allow: true, requireMention: true}` — the `allow` field is not in the schema (should be `enabled`). This causes the gateway to skip the reload: "config reload skipped (invalid config): channels.matrix.groups.*: must NOT have additional properties".
+2. The template also writes a non-empty `commands` object (`{restart:true, native:"auto", nativeSkills:"auto", ownerDisplay:"raw"}` or omits the key entirely). The gateway's running state has `commands:{}` (it clears the object after processing the startup restart signal). When `manager-config-keeper.sh` fixed the `allow` schema, the gateway finally processed the reload — and detected that `commands` changed (running `{}` vs file non-empty) → "config change requires gateway restart (commands)" → code 1012.
+
+**Sequence:** controller writes bad template → reload skipped → keeper fixes schema → gateway sees `commands` changed → restart → repeat every ~5 min.
+
+**Fix:** `manager-config-keeper.sh` now explicitly sets `commands: {}` when writing back the corrected config. This mirrors the gateway's cleared running state, so `commands` never appears changed when the keeper fixes the schema. Hot reload applied without restart.
+
+**Rule:** `manager-config-keeper.sh` must always write `commands: {}`. Do not restore or preserve the controller's `commands` content when writing back the config. See Idiosyncratic Decision #1.
+
+**Confirmed working:** After the fix, the controller wrote at 17:47 (bad schema → skip), keeper ran at 17:48, result: "config hot reload applied (channels.matrix.accessToken, plugins.allow)" — no restart, no code 1012.
+
+---
+
+### Incident 3 — Chrome double-instance OOM crash (2026-05-08)
 
 **What happened:** Server ran out of memory (swap exhausted at 3.8/4 GB, ~422 MB RAM free). Two Chrome instances were running simultaneously, consuming ~2.2 GB RSS combined. Server became unresponsive.
 

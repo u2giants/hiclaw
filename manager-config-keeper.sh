@@ -39,11 +39,24 @@ try:
 
     changed = False
 
-    # Fix commands.restart
-    if not d.get('commands', {}).get('restart', True):
-        d.setdefault('commands', {})['restart'] = True
+    # Normalize commands to {} to match the gateway cleared running state.
+    # Root cause of restart loop: controller writes template every ~5 min with
+    # commands:{restart:true,native,...} or no commands key, plus allow field in
+    # matrix groups that fails schema. Gateway skips reload (invalid schema).
+    # Keeper fixes schema, writes back preserving controller commands content.
+    # Gateway then sees commands changed ({} running vs controller value in file)
+    # and triggers restart. Fix: always write commands:{} so gateway running state
+    # matches file state — no commands diff, no restart on schema fix.
+    # Safe: startup script sets commands.restart=true which gateway processes within
+    # seconds, well before this keeper 60-second cron window.
+    current_cmds = d.get('commands', None)
+    if current_cmds != {}:
+        d['commands'] = {}
         changed = True
-        print('commands.restart corrected to true')
+        if current_cmds:
+            print('commands normalized to {} (was: %s)' % sorted(current_cmds.keys()))
+        else:
+            print('commands key normalized to {} (was absent/null)')
 
     # Route Matrix DMs to the same main session used by OpenClaw web chat.
     if d.get('session', {}).get('dmScope') != 'main':
