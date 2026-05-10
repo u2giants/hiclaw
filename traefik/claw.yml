@@ -28,6 +28,12 @@ http:
       middlewares: [redirect-to-https]
       service: hiclaw-gateway-svc
 
+    hiclaw-vnc-http:
+      rule: "Host(`vnc.designflow.app`)"
+      entrypoints: [http]
+      middlewares: [redirect-to-https]
+      service: hiclaw-vnc-svc
+
     # oauth2-proxy callback + sign-out (no auth middleware)
     hiclaw-oauth2:
       rule: "Host(`control.claw.designflow.app`) && PathPrefix(`/oauth2`)"
@@ -67,6 +73,16 @@ http:
       service: hiclaw-element-svc
       priority: 10
 
+    # noVNC Desktop -- protected by Google auth
+    hiclaw-vnc:
+      rule: "Host(`vnc.designflow.app`)"
+      entrypoints: [https]
+      tls:
+        certResolver: letsencrypt
+      middlewares: [google-auth]
+      service: hiclaw-vnc-svc
+      priority: 10
+
     # Matrix API -- NO auth middleware
     hiclaw-matrix:
       rule: "Host(`claw.designflow.app`) && (PathPrefix(`/_matrix`) || PathPrefix(`/_synapse`))"
@@ -93,6 +109,10 @@ http:
       loadBalancer:
         servers:
           - url: "http://hiclaw-manager:18799"
+    hiclaw-vnc-svc:
+      loadBalancer:
+        servers:
+          - url: "http://novnc-desktop:3000"
     oauth2-proxy-svc:
       loadBalancer:
         servers:
