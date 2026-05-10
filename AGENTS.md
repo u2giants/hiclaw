@@ -167,11 +167,11 @@ Changes made to files outside our own directories (upstream merge conflict check
 |---|---|---|---|---|
 | `hiclaw-controller` | Core orchestration, MinIO, internal DB, agent API | `controller-bootstrap-keeper.sh` | `higress/hiclaw-embedded:v1.1.0` | not in Coolify |
 | `hiclaw-manager` | Manager agent, OpenClaw gateway, Matrix integration | `manager-bootstrap-keeper.sh` | `higress/hiclaw-manager:v1.1.0` | not in Coolify |
-| `novnc-e10kwzww46ljhrgz1qj08j6a` | Chrome browser via noVNC for CDP automation | Coolify service `openmanus-stack` | `ghcr.io/u2giants/novnc-desktop:latest` | `e10kwzww46ljhrgz1qj08j6a` |
+| `novnc-desktop` | Chrome browser via noVNC for CDP automation | manually (not in Coolify) | `ghcr.io/u2giants/novnc-desktop:latest` | not in Coolify (deleted 2026-05-10) |
 | `oauth2-proxy` | Google OAuth gate for web services | `oauth2-proxy/docker-compose.yml` (direct) | `quay.io/oauth2-proxy/oauth2-proxy:latest` | not in Coolify |
 | `authentik` (+ worker) | Identity provider (separate from oauth2-proxy) | Coolify service `authentik` | `ghcr.io/goauthentik/server` | `qbtr8iksui67c7yoh8vswo7m` |
 
-**Naming note:** `hiclaw-manager`, `hiclaw-controller`, and `oauth2-proxy` are in production with these names — do not rename. The novnc container name includes the Coolify service UUID — this is Coolify-managed and expected.
+**Naming note:** `hiclaw-manager`, `hiclaw-controller`, and `oauth2-proxy` are in production with these names — do not rename. The `novnc-desktop` container is started manually via `docker run` with `--restart unless-stopped`; networks `e10kwzww46ljhrgz1qj08j6a` and `coolify` are both attached. CDP endpoint remains `10.0.5.4:9223` (static IP on the `e10kwzww46ljhrgz1qj08j6a` network).
 
 ---
 
@@ -310,7 +310,7 @@ All variable names are in `.env.example`. Real values are never committed. Sourc
 |---|---|
 | `COOLIFY_BASE_URL` | `https://coolify.designflow.app` |
 | `COOLIFY_API_TOKEN` | Coolify API token |
-| `COOLIFY_SERVICE_UUID` | `e10kwzww46ljhrgz1qj08j6a` (openmanus-stack / novnc) |
+| `COOLIFY_SERVICE_UUID` | `e10kwzww46ljhrgz1qj08j6a` (openmanus-stack / novnc) — **DELETED from Coolify 2026-05-10; kept for reference only** |
 
 ---
 
@@ -320,15 +320,27 @@ All variable names are in `.env.example`. Real values are never committed. Sourc
 1. Commit changes to `novnc-desktop/` and push to `main`
 2. GitHub Actions (`.github/workflows/build-and-push.yml`) triggers automatically
 3. Builds `ghcr.io/u2giants/novnc-desktop:latest` + `:sha-<commit>`
-4. Calls Coolify API to restart the `openmanus-stack` service
-5. Coolify pulls new `:latest` and restarts the novnc container
+4. CI tries to call Coolify API to restart the service — this will fail (service was deleted); ignore the error
+5. To apply a new image: `docker pull ghcr.io/u2giants/novnc-desktop:latest && docker stop novnc-desktop && docker rm novnc-desktop` then re-run the `docker run` command from the decision tree below
 
 **Shell scripts and configs (keeper scripts, oauth2-proxy, etc.):**
 - No automated deploy — these run directly on the host
 - After pushing changes: SSH to server, `cd /worksp/hiclaw && git pull`
 - Then restart the affected service manually (see Decision Tree)
 
-**Rollback novnc-desktop:** In Coolify UI → openmanus-stack → change image tag to `:sha-<previous-commit>` and redeploy.
+**Restart novnc-desktop from scratch:**
+```bash
+docker pull ghcr.io/u2giants/novnc-desktop:latest
+docker stop novnc-desktop && docker rm novnc-desktop
+docker run -d --name novnc-desktop \
+  --network e10kwzww46ljhrgz1qj08j6a --ip 10.0.5.4 \
+  -v novnc-e10kwzww46ljhrgz1qj08j6a-config:/config \
+  -e PUID=1000 -e PGID=1000 -e TZ=UTC -e "TITLE=HiClaw Desktop" \
+  --shm-size=2g --restart unless-stopped \
+  ghcr.io/u2giants/novnc-desktop:latest
+docker network connect coolify novnc-desktop
+```
+**Rollback:** replace `:latest` with `:sha-<previous-commit>` in the run command.
 
 **hiclaw-manager / hiclaw-controller:** Images come from Alibaba's registry (`higress-registry.cn-hangzhou.cr.aliyuncs.com`). We don't build or push these. To upgrade, update the image tag in `start-manager-agent.sh` and restart.
 
