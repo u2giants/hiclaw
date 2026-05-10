@@ -73,13 +73,12 @@ http:
       service: hiclaw-element-svc
       priority: 10
 
-    # noVNC Desktop -- protected by Google auth
+    # noVNC Desktop -- no auth (personal VNC, not exposed via shared domain)
     hiclaw-vnc:
       rule: "Host(`vnc.designflow.app`)"
       entrypoints: [https]
       tls:
         certResolver: letsencrypt
-      middlewares: [google-auth]
       service: hiclaw-vnc-svc
       priority: 10
 
