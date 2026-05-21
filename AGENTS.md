@@ -332,16 +332,19 @@ All variable names are in `.env.example`. Real values are never committed. Sourc
 
 **Restart novnc-desktop from scratch:**
 ```bash
+# Or just run: bash /worksp/hiclaw/novnc-desktop/recreate.sh
 docker pull ghcr.io/u2giants/novnc-desktop:latest
 docker stop novnc-desktop && docker rm novnc-desktop
 docker run -d --name novnc-desktop \
   --network e10kwzww46ljhrgz1qj08j6a --ip 10.0.5.4 \
+  --dns 1.1.1.1 --dns 8.8.8.8 \
   -v novnc-e10kwzww46ljhrgz1qj08j6a-config:/config \
   -e PUID=1000 -e PGID=1000 -e TZ=UTC -e "TITLE=HiClaw Desktop" \
   --shm-size=2g --restart unless-stopped \
   ghcr.io/u2giants/novnc-desktop:latest
 docker network connect coolify novnc-desktop
 ```
+**`--dns` is required.** The host resolver uses Tailscale DNS (`100.100.100.100`) which is unreachable from inside Docker. Without explicit DNS the browser has no internet. `--ip 10.0.5.4` is also required — it is hardcoded as the CDP endpoint for browser MCP.
 **Rollback:** replace `:latest` with `:sha-<previous-commit>` in the run command.
 
 **hiclaw-manager / hiclaw-controller:** Images come from Alibaba's registry (`higress-registry.cn-hangzhou.cr.aliyuncs.com`). We don't build or push these. To upgrade, update the image tag in `start-manager-agent.sh` and restart.
