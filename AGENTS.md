@@ -187,17 +187,17 @@ These exist on the server but are not in the repo and are not relevant to develo
 
 ## 11. Idiosyncratic Decisions
 
-### manager-config-keeper.sh always writes commands:{}
+### manager-config-keeper.sh always writes commands:{restart:true}
 
-**Looks like:** The keeper is destroying the controller's `commands` configuration by resetting it to `{}`.
+**Looks like:** The keeper is forcing `commands.restart=true` which sounds like it would keep triggering gateway restarts.
 
-**Actually:** This is intentional and required to stop the 5-minute restart loop. The controller writes its template to the shared openclaw.json every ~5 minutes, including fields like `commands: {restart:true, native:"auto", nativeSkills:"auto", ownerDisplay:"raw"}`. It also writes an invalid matrix groups schema (`allow: true` instead of `enabled: true`) that causes the gateway to skip the reload. When the keeper fixes the schema and writes back — preserving the controller's `commands` content — the gateway detects `commands` changed (running state is `{}`, file has controller's content) and triggers a restart.
+**Actually:** The gateway triggers a restart only when `commands` CHANGES in the diff (diff-based, not value-based). The gateway records its initial startup config (which has `commands.restart=true`) as the baseline in `config-health.json`. Every subsequent reload diff compares the current file against that startup baseline. Writing `commands:{restart:true}` in the keeper means the diff shows no change in `commands`, so schema fixes are applied as hot reloads — not restarts.
 
-**Why:** After the gateway processes the initial `commands.restart=true` signal on startup, it clears `commands` to `{}`. By ensuring the file also has `commands: {}`, the keeper's schema-fix write never changes `commands`. The gateway reloads without restarting.
+**Why not `commands:{}`:** The controller writes `commands: null` every ~5 minutes. If the keeper then wrote `commands:{}`, the diff from the startup baseline (`commands.restart:true`) would show `commands.restart` changed → restart. Likewise `null→{}` shows `commands` changed → restart. The stable value must match the startup baseline: `{restart:true}`.
 
-**Do not change because:** Restoring the `commands` fields from the controller's template causes "config change requires gateway restart (commands)" every 5 minutes, dropping all WebSocket connections. See Critical Incident Log #2.
+**Do not change because:** Writing any other value (null, {}, {restart:false}) causes "config change requires gateway restart (commands)" every 5 minutes. The only stable value is `{restart:true}`, which produces zero diff against the gateway's recorded startup baseline. See Critical Incident Log #2.
 
-**Startup safety:** The startup script sets `commands.restart=true` to force the initial in-process reload. The gateway processes this within seconds. The keeper's 60-second cron window means the keeper never fires before the startup restart completes — it would always see `commands: {}` already cleared.
+**Startup safety:** The startup script sets `commands.restart=true` before starting the gateway. The gateway processes this on initial load. The keeper's 60-second cron interval means it always fires AFTER the initial gateway startup is complete.
 
 ---
 
@@ -354,7 +354,7 @@ docker network connect coolify novnc-desktop
 
 **Root cause:** `start-manager-agent.sh` was setting `commands.restart = false` unconditionally at startup. The controller reconciliation loop then wrote `true`, triggering a restart. After restart, the script ran again, set it to false again — infinite loop.
 
-**Fix:** Lines 710 and 785 of `start-manager-agent.sh` changed to set `commands.restart = true` unconditionally at startup (not false). The controller's subsequent write of `true` is a no-op (no false→true edge). `manager-config-keeper.sh` normalizes `commands: {}` to prevent the commands-change restart cascade — see Incident 2.
+**Fix:** Lines 710 and 785 of `start-manager-agent.sh` changed to set `commands.restart = true` unconditionally at startup (not false). The controller's subsequent write of `null` is handled by `manager-config-keeper.sh` which writes `commands: {restart: true}` to maintain a stable diff against the startup baseline — see Incident 2.
 
 **Rule:** Never set `commands.restart=false` in `openclaw.json`. See Idiosyncratic Decision #1.
 
@@ -379,15 +379,15 @@ docker exec hiclaw-manager bash -c 'echo "{\"kind\":\"gateway-restart\",\"pid\":
 
 **Root cause:** Two compounding bugs:
 1. The controller writes its template to the shared `openclaw.json` every ~5 minutes. The template has `channels.matrix.groups["*"]: {allow: true, requireMention: true}` — the `allow` field is not in the schema (should be `enabled`). This causes the gateway to skip the reload: "config reload skipped (invalid config): channels.matrix.groups.*: must NOT have additional properties".
-2. The template also writes a non-empty `commands` object (`{restart:true, native:"auto", nativeSkills:"auto", ownerDisplay:"raw"}` or omits the key entirely). The gateway's running state has `commands:{}` (it clears the object after processing the startup restart signal). When `manager-config-keeper.sh` fixed the `allow` schema, the gateway finally processed the reload — and detected that `commands` changed (running `{}` vs file non-empty) → "config change requires gateway restart (commands)" → code 1012.
+2. The gateway uses its initial startup config (which the startup script wrote with `commands.restart=true`) as the baseline for all subsequent reload diffs, recorded in `config-health.json`. The controller writes `commands: null` in its template. When `manager-config-keeper.sh` fixed the `allow` schema (while writing `commands:{}` or preserving `null`), the diff against the startup baseline showed `commands` changed → "config change requires gateway restart (commands)" → code 1012.
 
-**Sequence:** controller writes bad template → reload skipped → keeper fixes schema → gateway sees `commands` changed → restart → repeat every ~5 min.
+**Sequence:** controller writes (bad schema + commands:null) → reload skipped → keeper fixes schema, writes commands:{} or null → gateway diffs against startup baseline (commands.restart:true) → `commands` changed → restart → repeat every ~5 min.
 
-**Fix:** `manager-config-keeper.sh` now explicitly sets `commands: {}` when writing back the corrected config. This mirrors the gateway's cleared running state, so `commands` never appears changed when the keeper fixes the schema. Hot reload applied without restart.
+**Fix:** `manager-config-keeper.sh` now writes `commands: {restart: true}` — matching the startup baseline exactly. The diff for `commands` is zero. Schema fixes are applied as hot reloads.
 
-**Rule:** `manager-config-keeper.sh` must always write `commands: {}`. Do not restore or preserve the controller's `commands` content when writing back the config. See Idiosyncratic Decision #1.
+**Rule:** `manager-config-keeper.sh` must always write `commands: {restart: true}`. Do not write `{}`, `null`, or `false`. The only stable value is `{restart:true}`, which produces zero diff against the gateway's startup baseline. See Idiosyncratic Decision #1.
 
-**Confirmed working:** After the fix, the controller wrote at 17:47 (bad schema → skip), keeper ran at 17:48, result: "config hot reload applied (channels.matrix.accessToken, plugins.allow)" — no restart, no code 1012.
+**Confirmed working (2026-05-21):** After the fix, the controller wrote at 02:32:19 (bad schema → skip), keeper ran at 02:33:01, result: no gateway log entries — zero diff, no reload triggered. The restart loop is broken.
 
 ---
 

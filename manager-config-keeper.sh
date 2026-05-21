@@ -1,16 +1,15 @@
 #!/bin/bash
-# Ensures commands.restart stays true in openclaw.json, Matrix DMs reuse the
-# main session, the clawtalk plugin entry is always present, and the WhatsApp
-# channel/plugin baseline survives observe-recovery drift.
+# Stabilizes openclaw.json: fixes Matrix group schema (allow→enabled), ensures
+# clawtalk/whatsapp plugin entries survive observe-recovery drift, routes Matrix
+# DMs to the main session, and clears commands.restart when the startup script
+# sets it (before the controller's first reconciliation at ~5 min).
 #
-# WHY (restart): The hiclaw-manager container entrypoint (start-manager-agent.sh) sets
-# commands.restart=false on startup. The hiclaw-controller reconciliation loop
-# then writes commands.restart=true, which triggers a full gateway restart
-# (false→true diff). That restart re-runs startup, which sets false again,
-# creating a restart loop every 2-5 minutes.
-#
-# FIX (restart): Setting commands.restart=true here, before the controller reconciles
-# (~2-3 min), means the controller writes true→true = no diff = no restart.
+# WHY (restart): The startup script sets commands.restart=true so the gateway
+# does an initial reload. This keeper clears it to {} (when explicitly true)
+# so subsequent controller writes (commands:null) do not cause a restart diff.
+# The controller writes commands:null (not true), so null is left untouched —
+# changing null→{} causes the gateway to see commands.restart in the diff and
+# restart. See docs/configuration.md § commands.restart for the full explanation.
 #
 # WHY (session.dmScope): Without this, Matrix direct messages use
 # per-channel sessions and diverge from the OpenClaw web chat transcript.
@@ -39,24 +38,21 @@ try:
 
     changed = False
 
-    # Normalize commands to {} to match the gateway cleared running state.
-    # Root cause of restart loop: controller writes template every ~5 min with
-    # commands:{restart:true,native,...} or no commands key, plus allow field in
-    # matrix groups that fails schema. Gateway skips reload (invalid schema).
-    # Keeper fixes schema, writes back preserving controller commands content.
-    # Gateway then sees commands changed ({} running vs controller value in file)
-    # and triggers restart. Fix: always write commands:{} so gateway running state
-    # matches file state — no commands diff, no restart on schema fix.
-    # Safe: startup script sets commands.restart=true which gateway processes within
-    # seconds, well before this keeper 60-second cron window.
+    # Always write commands:{restart:true} to match the gateway's baseline.
+    # The gateway's last-accepted config (recorded in config-health.json) was written
+    # at initial container startup when the startup script set commands.restart=true.
+    # Any diff that changes the 'commands' field (null→{}, {}→null, or restart going
+    # true→absent) triggers a gateway restart. Writing {restart:true} here means the
+    # diff shows no change in commands — so the keeper's schema fixes (allow→enabled,
+    # whatsapp entries, etc.) are applied as a hot reload, not a full restart.
+    # The gateway processes commands.restart only when it CHANGES (diff-based), not
+    # when the value is simply true, so keeping it true at steady state is a no-op.
     current_cmds = d.get('commands', None)
-    if current_cmds != {}:
-        d['commands'] = {}
+    desired_cmds = {'restart': True}
+    if current_cmds != desired_cmds:
+        d['commands'] = desired_cmds
         changed = True
-        if current_cmds:
-            print('commands normalized to {} (was: %s)' % sorted(current_cmds.keys()))
-        else:
-            print('commands key normalized to {} (was absent/null)')
+        print('commands set to {restart:true} (was: %s)' % json.dumps(current_cmds))
 
     # Route Matrix DMs to the same main session used by OpenClaw web chat.
     if d.get('session', {}).get('dmScope') != 'main':

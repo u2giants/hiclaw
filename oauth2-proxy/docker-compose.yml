@@ -26,6 +26,9 @@ services:
       - --cookie-secure=true
       - --cookie-samesite=lax
       - --cookie-name=_oauth2_proxy_claw
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./allowed-emails.txt:/etc/oauth2-proxy/allowed-emails.txt:ro
     networks:

@@ -31,13 +31,13 @@ This file has three concurrent writers: the controller reconciler, the OpenClaw 
 
 ### `commands.restart`
 
-**Effective behavior:** The startup script (`start-manager-agent.sh`) sets `commands.restart = true` at startup. The gateway processes this as a "reload now" signal within seconds, then clears `commands` to `{}`. The keeper (`manager-config-keeper.sh`) then normalizes `commands: {}` in the file to match the gateway's cleared running state.
+**Effective behavior:** The startup script (`start-manager-agent.sh`) sets `commands.restart = true` at startup. The gateway records this initial config (including `commands.restart: true`) as its baseline in `config-health.json`. All subsequent reload diff evaluations compare the current file against this baseline.
 
-**Why not just leave it `true`:** The controller writes its reconciliation template every ~5 minutes with `commands: {restart: true, native: "auto", ...}`. If the file contains a non-empty `commands` object when the keeper fixes the schema, the gateway sees a state change in `commands` (running `{}` vs file non-empty) and triggers another restart. Setting `commands: {}` in the file means this diff never occurs.
+**Steady-state value:** `commands: {"restart": true}` — kept there permanently by the keeper. This matches the gateway's startup baseline, so `commands` never appears as a changed field in the diff. The gateway only triggers a restart when `commands` CHANGES (diff-based, not value-based), so a stable `commands.restart: true` is a no-op.
 
-**What the keeper actually writes:** `commands: {}` — not `commands.restart: true`. The startup `true` is consumed immediately and is not the steady-state value.
+**Why not `commands: {}`:** The controller writes `commands: null` every ~5 minutes in its reconciliation template. If the keeper then wrote `commands: {}`, the diff from the startup baseline (`commands.restart: true`) would show `commands.restart` changed — triggering a restart every cycle. Likewise, writing `null → {}` also shows a `commands` diff. Keeping `commands: {restart: true}` at all times ensures zero diff against the startup baseline, and the gateway applies config changes as hot reloads instead.
 
-**Do not change:** If you set `commands.restart = false` anywhere in this path, the controller will later write `true`, the gateway will see a `false → true` transition, and trigger a restart loop. If you leave `commands` non-empty after the initial startup, the 5-minute controller reconciliation will restart the gateway on every cycle. See Critical Incidents 1 and 2 in AGENTS.md.
+**Do not set `commands.restart = false`:** A `false → true` transition when the controller next writes would trigger a restart loop. Keep the keeper writing `{restart: true}` at steady state.
 
 ### `session.dmScope`
 
