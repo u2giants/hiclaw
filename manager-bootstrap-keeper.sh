@@ -50,6 +50,12 @@ else
     docker exec "${CONTAINER_NAME}" chmod 755 "${CONTAINER_SCRIPT}"
     echo "${container_id}" > "${STATE_FILE}"
 
+    # Re-apply resource limits after container recreation (docker update is
+    # not persistent across docker rm + docker run — new containers start uncapped).
+    docker update --memory 768m --memory-swap 768m --cpus 1 "${CONTAINER_NAME}" >/dev/null \
+        && echo "resource limits re-applied (768m RAM, 1 CPU)" \
+        || echo "warning: docker update failed; container may be uncapped"
+
     if [ "${container_hash}" != "${host_hash}" ]; then
         echo "restarting ${CONTAINER_NAME} to activate patched startup script"
         docker restart "${CONTAINER_NAME}" >/dev/null

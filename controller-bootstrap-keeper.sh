@@ -67,6 +67,12 @@ docker cp "${HOST_TUWUNEL_SCRIPT}" "${CONTAINER_NAME}:${CONTAINER_TUWUNEL_SCRIPT
 docker exec "${CONTAINER_NAME}" chmod 755 "${CONTAINER_ELEMENT_SCRIPT}" "${CONTAINER_TUWUNEL_SCRIPT}"
 echo "${container_id}" > "${STATE_FILE}"
 
+# Re-apply resource limits after container recreation (docker update is
+# not persistent across docker rm + docker run — new containers start uncapped).
+docker update --memory 2g --memory-swap 2g --cpus 2 "${CONTAINER_NAME}" >/dev/null \
+    && echo "resource limits re-applied (2g RAM, 2 CPUs)" \
+    || echo "warning: docker update failed; container may be uncapped"
+
 if [ "${container_element_hash}" != "${host_element_hash}" ] || [ "${container_tuwunel_hash}" != "${host_tuwunel_hash}" ]; then
     echo "restarting ${CONTAINER_NAME} to activate patched controller startup"
     docker restart "${CONTAINER_NAME}" >/dev/null
