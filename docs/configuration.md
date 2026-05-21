@@ -31,13 +31,73 @@ This file has three concurrent writers: the controller reconciler, the OpenClaw 
 
 ### `commands.restart`
 
-**Effective behavior:** The startup script (`start-manager-agent.sh`) sets `commands.restart = true` at startup. The gateway records this initial config (including `commands.restart: true`) as its baseline in `config-health.json`. All subsequent reload diff evaluations compare the current file against this baseline.
+#### How the gateway's reload diff works
 
-**Steady-state value:** `commands: {"restart": true}` — kept there permanently by the keeper. This matches the gateway's startup baseline, so `commands` never appears as a changed field in the diff. The gateway only triggers a restart when `commands` CHANGES (diff-based, not value-based), so a stable `commands.restart: true` is a no-op.
+This is the most non-obvious part of the system. Read it carefully before touching anything related to `commands`.
 
-**Why not `commands: {}`:** The controller writes `commands: null` every ~5 minutes in its reconciliation template. If the keeper then wrote `commands: {}`, the diff from the startup baseline (`commands.restart: true`) would show `commands.restart` changed — triggering a restart every cycle. Likewise, writing `null → {}` also shows a `commands` diff. Keeping `commands: {restart: true}` at all times ensures zero diff against the startup baseline, and the gateway applies config changes as hot reloads instead.
+**The gateway uses a startup baseline, not its in-memory running state, for reload diffs.**
 
-**Do not set `commands.restart = false`:** A `false → true` transition when the controller next writes would trigger a restart loop. Keep the keeper writing `{restart: true}` at steady state.
+When the container starts, `start-manager-agent.sh` writes `commands.restart = true` to `openclaw.json` before launching the gateway. The gateway loads this file and records it as the "last known good" in `workspace/.openclaw/logs/config-health.json`. This initial config — including `commands.restart: true` and the runtime fields the gateway adds on startup (Matrix accessToken, tools, meta, agents.defaults.elevatedDefault) — becomes the **permanent baseline** for all future reload evaluations. The gateway does NOT update this baseline after in-process restarts.
+
+Every time `openclaw.json` changes on disk, the gateway computes a field-by-field diff between the current file and this startup baseline. If `commands` or any of its sub-keys appears as changed, the gateway triggers a full in-process restart (SIGUSR1) instead of a hot reload.
+
+#### The restart trigger
+
+The gateway only restarts when `commands` **changes in the diff** — it is diff-based, not value-based. A stable `commands.restart: true` does not cause restarts because it matches the startup baseline and produces a zero diff.
+
+#### What the controller writes
+
+The controller's ManagerReconciler writes its template to `openclaw.json` every ~5 minutes. That template sets `commands: null`. This is a deliberate reset — the controller does not own the commands signal. After this write, `commands` in the file is `null`.
+
+#### Steady-state value: `commands: {"restart": true}`
+
+`manager-config-keeper.sh` writes `commands: {"restart": true}` on every run. This is the only value that produces a zero diff against the startup baseline:
+
+| Value keeper writes | Diff vs startup baseline | Result |
+|---|---|---|
+| `{"restart": true}` | No change in `commands` | ✅ Hot reload only |
+| `{}` | `commands.restart` removed (true → absent) | ❌ Full restart |
+| `null` | `commands` changed (object → null) | ❌ Full restart |
+| `{"restart": false}` | `commands.restart` changed (true → false) | ❌ Full restart |
+
+#### Inspect the baseline yourself
+
+```bash
+sudo python3 -c "
+import json
+h = json.load(open('/worksp/hiclaw/workspace/.openclaw/logs/config-health.json'))
+for path, info in h['entries'].items():
+    lg = info['lastKnownGood']
+    print(path)
+    print('  hash:', lg['hash'][:16], ' bytes:', lg['bytes'])
+    print('  observed:', lg['observedAt'])
+"
+```
+
+The `/root/manager-workspace/openclaw.json` entry is the active baseline. Its byte count is larger than the keeper's output (typically 10000+ vs 9500+ bytes) because the gateway adds runtime fields the keeper does not preserve.
+
+#### Verify the keeper is writing the right value
+
+```bash
+sudo python3 -c "import json; d=json.load(open('/worksp/hiclaw/workspace/openclaw.json')); print('commands:', d.get('commands'))"
+# Expected: {'restart': True}
+```
+
+#### What a broken state looks like
+
+If `commands` gets set to anything other than `{"restart": true}`, you will see this pattern in `docker logs hiclaw-manager` repeating every ~5 minutes:
+
+```
+[reload] config reload skipped (invalid config): channels.matrix.groups.*: ...
+[reload] config change detected; evaluating reload (..., commands.restart, ...)
+[reload] config change requires gateway restart (commands.restart)
+[gateway] signal SIGUSR1 received
+[gateway] received SIGUSR1; restarting
+```
+
+To fix: run `bash /worksp/hiclaw/manager-config-keeper.sh` — the keeper will set `commands: {restart: true}` and the loop will stop within one cycle.
+
+**Do not set `commands.restart = false`:** Writing false would produce `false → true` diffs on subsequent controller writes, re-triggering the loop. See Critical Incidents 1 and 2 in AGENTS.md for the full history.
 
 ### `session.dmScope`
 
