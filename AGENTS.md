@@ -407,6 +407,49 @@ docker exec hiclaw-manager bash -c 'echo "{\"kind\":\"gateway-restart\",\"pid\":
 
 ---
 
+### Incident 4 — MinIO recursive storage path / server crash (2026-05-20)
+
+**What happened:** Server hard-crashed at 20:32. After reboot at 20:33, MinIO was consuming ~1 GB RSS and ~30% CPU. Investigation found a recursive MinIO object path: `hiclaw-storage/manager/hiclaw/hiclaw-storage/manager/hiclaw/hiclaw-storage/...` (multiple nesting levels, previously 9+ GB). A local copy of the same recursive tree existed in the workspace at `/worksp/hiclaw/workspace/hiclaw/hiclaw-storage/manager/`. 617 `openclaw.json.clobbered.*` files accumulated from May 4-5.
+
+**Root cause:** `HICLAW_RUNTIME=k8s` (confirmed from `docker inspect hiclaw-manager`) causes the k8s startup block in `start-manager-agent.sh` (lines 171-182) to execute `mc mirror hiclaw/hiclaw-storage/manager/ /root/manager-workspace/ --overwrite` on every container start — pulling the entire MinIO `manager/` prefix into the workspace. The controller's internal ManagerReconciler then pushes the workspace (mounted at `/root/hiclaw-fs/agents/manager/` in the controller) back to `hiclaw/hiclaw-storage/manager/`. Since the workspace now contained `hiclaw/hiclaw-storage/` from the pull, the push created a nested copy in MinIO. Each restart cycle added one more level of nesting.
+
+**Cascade:**
+1. Manager starts → pulls MinIO `manager/` → workspace (workspace now has `hiclaw/hiclaw-storage/` inside it)
+2. Controller's ManagerReconciler pushes workspace → MinIO `manager/` (includes the nested `hiclaw/hiclaw-storage/` subdirectory)
+3. Next restart: pull brings back a deeper nested copy → push creates an even deeper one
+4. Over time: `manager/hiclaw/hiclaw-storage/manager/hiclaw/hiclaw-storage/manager/...` grows unboundedly
+
+The `openclaw.json.clobbered.*` files are created by OpenClaw's observe-recovery mechanism when it detects config hash mismatches (triggered by `manager-config-keeper.sh` fixing the schema). They lived in the workspace and would be pushed to MinIO with the workspace — adding more noise but not causing the crash.
+
+**Fix applied (2026-05-20):**
+1. Cleaned workspace: `rm -rf /worksp/hiclaw/workspace/hiclaw/ /worksp/hiclaw/workspace/hiclaw-fs` (removed 9GB recursive local copy)
+2. Deleted 617 stale `openclaw.json.clobbered.*` files from workspace (from the resolved May 4-5 restart loop)
+3. Added `--exclude` guards to the k8s startup `mc mirror` pull in `start-manager-agent.sh` (lines 186-193) to permanently block these paths from entering the workspace
+
+**Rule:** Never pull `hiclaw/*`, `hiclaw-fs`, `*.clobbered.*`, `.npm/*`, `.codex/*`, or `.cache/*` into the workspace from MinIO. The k8s startup pull (`mc mirror ... /root/manager-workspace/`) must use the exclusion flags now present in the script.
+
+**Cleanup check (run after any suspected recursion):**
+```bash
+BASE="/var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage"
+sudo find "$BASE" -maxdepth 8 -type d -name "hiclaw-storage" -print
+# Should print ONLY the root: .../minio/hiclaw-storage
+# Any additional lines mean the recursion has returned — stop containers immediately
+```
+
+**Recovery if recursion returns:**
+```bash
+docker stop hiclaw-manager hiclaw-controller
+# Clean workspace local copy
+sudo rm -rf /worksp/hiclaw/workspace/hiclaw/
+# Clean MinIO nested content (only the recursive subtree, not the real manager/ content)
+# Use mc rm --recursive from inside a temporary container with mc access to:
+#   hiclaw/hiclaw-storage/manager/hiclaw/ (everything under this prefix)
+# Then restart containers
+docker start hiclaw-controller && sleep 15 && docker start hiclaw-manager
+```
+
+---
+
 ### Incident 3 — clawtalk plugin lost on container restart (ongoing)
 
 **What happened:** The clawtalk npm plugin (for ClawTalk integration) loads correctly in the OpenClaw CLI but not in the running gateway. A CJS wrapper was created inside the hiclaw-manager container to fix the ESM/CJS incompatibility, but it lives on the container's overlay filesystem and is wiped on every container restart.

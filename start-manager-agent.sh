@@ -175,7 +175,22 @@ if [ "${HICLAW_RUNTIME}" = "k8s" ]; then
     log "Configuring mc alias for cluster MinIO..."
     mc alias set hiclaw "${HICLAW_FS_ENDPOINT}" "${HICLAW_FS_ACCESS_KEY}" "${HICLAW_FS_SECRET_KEY}"
     log "Syncing workspace from MinIO..."
-    mc mirror "${HICLAW_STORAGE_PREFIX}/manager/" /root/manager-workspace/ --overwrite 2>/dev/null || true
+    # SAFETY: exclude paths that must never be pulled into the workspace from MinIO.
+    # "hiclaw/*" is a local MinIO-mirror directory (hiclaw/hiclaw-storage/...) that the
+    # controller's ManagerReconciler pushes back wholesale — pulling it into the workspace
+    # and then having it pushed back creates an exponentially growing recursive path:
+    #   manager/hiclaw/hiclaw-storage/manager/hiclaw/hiclaw-storage/...
+    # "hiclaw-fs" is a container-internal symlink recreated below; pulling it would overwrite.
+    # "*.clobbered.*" are observe-recovery backups that accumulate as runtime noise.
+    # ".npm/*" ".codex/*" ".cache/*" are runtime caches that should not round-trip through MinIO.
+    mc mirror "${HICLAW_STORAGE_PREFIX}/manager/" /root/manager-workspace/ --overwrite \
+        --exclude "hiclaw/*" \
+        --exclude "hiclaw-fs" \
+        --exclude "*.clobbered.*" \
+        --exclude ".npm/*" \
+        --exclude ".codex/*" \
+        --exclude ".cache/*" \
+        2>/dev/null || true
     mc mirror "${HICLAW_STORAGE_PREFIX}/" "${HICLAW_FS}/" --overwrite 2>/dev/null || true
     ln -sfn "${HICLAW_FS}" /root/manager-workspace/hiclaw-fs
     touch "${HICLAW_FS}/.initialized"
