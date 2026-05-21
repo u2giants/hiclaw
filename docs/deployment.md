@@ -2,26 +2,26 @@
 
 ## What deployment means here
 
-There is no standalone application release pipeline in this repo. Deployment here means keeping one live HiClaw installation operational across:
+There is no standalone application release pipeline. Deployment means keeping one live HiClaw installation operational across:
 
-- manager/container restarts
-- `hiclaw-manager` container recreation
-- HiClaw upgrades that reset container-local changes
+- manager/controller restarts
+- container recreation (by HiClaw upgrade or manual `docker rm` + `docker run`)
+- HiClaw upstream image upgrades that reset container-local changes
 
 ## Persistent Boundary
 
-The persistent boundary for this repo is the host filesystem under `/worksp/hiclaw`, not the inside of the containers.
+The persistent boundary is the host filesystem at `/worksp/hiclaw/`, not the inside of the containers.
 
-That means:
+| Survives container recreation | Does not survive |
+|---|---|
+| `workspace/` content (bind mount) | Changes made with `docker exec` not backed by a keeper |
+| Host scripts and cron jobs | Container-overlay files (npm packages, `/usr/local/bin/mc`, nginx config, `hiclaw-chat-api.py`) |
+| `oauth2-proxy/` config | |
+| `traefik/claw.yml` | |
 
-- files in `workspace/` survive container recreation
-- host scripts and cron survive container recreation
-- direct container edits do not survive recreation unless a host script reapplies them
-- manager workspace customizations such as `workspace/AGENTS.md` additions and `workspace/skills/...` helper scripts also survive manager container recreation
+Files created by `fix-element-config.sh` (mc wrapper, npm wrapper, some nginx config) live on the container overlay and are lost on recreation. The persistent equivalents are delivered by `start-element-web.sh` and `start-manager-agent.sh` via the keeper scripts.
 
-## Required Host Automation
-
-Install these cron jobs on the host:
+## Required Host Cron Jobs
 
 ```cron
 * * * * * /worksp/hiclaw/manager-config-keeper.sh >> /worksp/hiclaw/manager-config-keeper.log 2>&1
@@ -29,69 +29,135 @@ Install these cron jobs on the host:
 * * * * * /worksp/hiclaw/controller-bootstrap-keeper.sh >> /worksp/hiclaw/controller-bootstrap-keeper.log 2>&1
 ```
 
-Why both exist:
+Verify: `crontab -l`. All three must be present.
 
-- `manager-config-keeper.sh` stabilizes `workspace/openclaw.json`
-- `manager-bootstrap-keeper.sh` restores the patched manager startup script after container replacement
-- `controller-bootstrap-keeper.sh` restores the patched Element Web startup script after controller replacement
+## Starting the System
 
-## Upgrade Workflow
-
-### After a HiClaw upgrade
-
-Run:
+### First-time or after both containers are stopped
 
 ```bash
-/worksp/hiclaw/fix-element-config.sh
-```
+cd /worksp/hiclaw
 
-Why:
+# Start controller first — MinIO, Matrix, and Element Web initialize before manager needs them
+docker start hiclaw-controller
+sleep 20
 
-- upgrades can recreate `hiclaw-controller`
-- that resets Element Web config, nginx fragments, npm wrappers, mc wrappers, and some network attachments
+# Verify MinIO is clean BEFORE starting the manager
+sudo find /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage \
+  -maxdepth 8 -type d -name "hiclaw-storage" -print
+# Must print only the root path — extra lines mean the recursion bug is present
+# If extra lines appear: do NOT start the manager; follow architecture.md § MinIO recovery
 
-Then verify:
+# Start manager
+docker start hiclaw-manager
+sleep 30
 
-```bash
+# Verify MinIO is still clean after manager startup (manager pulls from MinIO on k8s startup)
+sudo find /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage \
+  -maxdepth 8 -type d -name "hiclaw-storage" -print
+ls /worksp/hiclaw/workspace/hiclaw/ 2>/dev/null && echo "WARNING: recursion seed appeared" || echo "OK"
+
+# Verify manager is healthy
 docker exec hiclaw-manager openclaw clawtalk doctor
 bash /worksp/hiclaw/manager-bootstrap-keeper.sh
+```
+
+### novnc-desktop
+
+```bash
+docker pull ghcr.io/u2giants/novnc-desktop:latest
+docker stop novnc-desktop && docker rm novnc-desktop
+docker run -d --name novnc-desktop \
+  --network e10kwzww46ljhrgz1qj08j6a --ip 10.0.5.4 \
+  -v novnc-e10kwzww46ljhrgz1qj08j6a-config:/config \
+  -e PUID=1000 -e PGID=1000 -e TZ=UTC -e "TITLE=HiClaw Desktop" \
+  --shm-size=2g --restart unless-stopped \
+  ghcr.io/u2giants/novnc-desktop:latest
+docker network connect coolify novnc-desktop
+```
+
+### oauth2-proxy
+
+```bash
+cd /worksp/hiclaw/oauth2-proxy
+docker compose up -d
+```
+
+## Normal Container Recreation (automatic)
+
+When HiClaw recreates `hiclaw-manager` or `hiclaw-controller`, the keeper cron jobs handle re-applying patches within 60 seconds:
+
+1. HiClaw recreates the container with the stock startup script.
+2. The keeper detects the script hash mismatch.
+3. The keeper copies the host-owned patched script into the container and restarts it once.
+4. The patched startup runs: MinIO sync pulls (with exclusions), ClawTalk bootstrap, gateway starts.
+
+During the restart window the keeper may log `container startup script not readable yet; skipping this run` — this is expected while the container is still booting.
+
+**Always run the MinIO recursion check after any restart.** See the check commands above.
+
+## HiClaw Upgrade Workflow
+
+After a HiClaw version upgrade (which recreates both containers):
+
+```bash
+# 1. Apply the one-off post-upgrade repair script
+/worksp/hiclaw/fix-element-config.sh
+
+# 2. Verify keepers have applied the patches
+bash /worksp/hiclaw/manager-bootstrap-keeper.sh
+bash /worksp/hiclaw/controller-bootstrap-keeper.sh
+
+# 3. Verify manager health
+docker exec hiclaw-manager openclaw clawtalk doctor
+
+# 4. Verify controller Element Web
 docker exec hiclaw-controller curl -s http://127.0.0.1:8088/hiclaw-api/healthz
+
+# 5. Reconnect networks (fix-element-config.sh does this, but verify)
+docker network connect coolify hiclaw-controller 2>/dev/null || true
+docker network connect e10kwzww46ljhrgz1qj08j6a hiclaw-manager 2>/dev/null || true
+
+# 6. Verify cron
 crontab -l
 ```
 
-## Container Recreation Workflow
+`fix-element-config.sh` also:
+- Installs a mc wrapper inside `hiclaw-manager` that intercepts MinIO sync and re-injects the `mcp` key after every pull
+- Installs an npm wrapper inside `hiclaw-manager` for the "Update now" button
+- Fixes the `channels.matrix.groups.*.allow → enabled` key in the MinIO-persisted `openclaw.json`
 
-You should not need to do anything manually in the normal case.
+These container-internal patches are ephemeral (lost on next recreation). The persistent versions come from `start-manager-agent.sh` and `start-element-web.sh`.
 
-Expected behavior:
+## novnc-desktop Image Update
 
-1. HiClaw recreates `hiclaw-manager`.
-2. Host cron runs `manager-bootstrap-keeper.sh`.
-3. The keeper copies the patched [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh) into the new container.
-4. The keeper restarts the container once if the container is still using the stock startup script.
-5. The patched startup path bootstraps ClawTalk before the gateway starts.
-6. The separate-chat helper in `workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh` is already present again because it lives in the persistent workspace, not in the container image.
-
-During the restart window, the keeper may log `container startup script not readable yet; skipping this run`. That is expected while the container is still early in boot.
-
-Verify with:
+Changes to `novnc-desktop/` trigger a GitHub Actions build automatically on push to `main`. To apply the new image:
 
 ```bash
-docker logs hiclaw-manager --since 10m | grep -E 'Bootstrapping ClawTalk|ClawTalk authenticated|http server listening'
-docker exec hiclaw-manager openclaw clawtalk doctor
+docker pull ghcr.io/u2giants/novnc-desktop:latest
+docker stop novnc-desktop && docker rm novnc-desktop
+# re-run the docker run command above
 ```
 
-For the HiClaw chat UI path, also verify:
+Rollback: replace `:latest` with `:sha-<previous-commit>`.
+
+## Script/Config Changes (no image involved)
 
 ```bash
-docker exec hiclaw-controller ps -ef | grep nginx | grep -v grep
-docker exec hiclaw-controller sh -lc 'ss -ltnp | grep -E ":(8088|18888|8002)\\b" || true'
-docker exec hiclaw-controller curl -s http://127.0.0.1:8088/hiclaw-api/healthz
+# On the host server:
+cd /worksp/hiclaw && git pull
+
+# Then restart affected service:
+# keeper scripts: cron picks up automatically
+# start-manager-agent.sh: bash manager-bootstrap-keeper.sh (detects hash change, restarts manager)
+# start-element-web.sh: bash controller-bootstrap-keeper.sh (detects hash change, restarts controller)
+# oauth2-proxy: cd oauth2-proxy && docker compose up -d
+# traefik: docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml
 ```
 
 ## Manual Recovery
 
-If automation did not converge:
+If automation has not converged after 2 minutes:
 
 ```bash
 bash /worksp/hiclaw/manager-bootstrap-keeper.sh
@@ -100,42 +166,33 @@ bash /worksp/hiclaw/mcp-keeper.sh
 docker exec hiclaw-manager openclaw clawtalk doctor
 ```
 
-## `oauth2-proxy` Sidecar
+## oauth2-proxy — Authentication Provider
 
-The control UI auth sidecar is managed separately:
-
-```bash
-cd /worksp/hiclaw/oauth2-proxy
-docker compose up -d
-```
-
-`docker-compose.yml` is live deployment config, not a template. Credentials are read from `oauth2-proxy/.env` (not committed to the repo).
-
-### Authentication provider: Authentik
-
-As of 2026-05-09, `oauth2-proxy` authenticates via Authentik (company OIDC IdP) instead of Google. Users must have an account in Authentik — which is populated from Active Directory via LDAP sync.
+Provider: Authentik (company OIDC IdP at `https://auth.designflow.app`)
 
 | Setting | Value |
-|---------|-------|
+|---|---|
 | Provider | `oidc` |
 | OIDC issuer | `https://auth.designflow.app/application/o/hiclaw/` |
-| Client type | confidential |
 | Redirect URI | `https://control.claw.designflow.app/oauth2/callback` |
-| Allowed emails | controlled by `oauth2-proxy/allowed-emails.txt` |
+| Cookie domain | `claw.designflow.app` and `*.claw.designflow.app` |
+| Allowed emails | `oauth2-proxy/allowed-emails.txt` |
 
-Login flow: visiting `control.claw.designflow.app` triggers an oauth2-proxy redirect to `auth.designflow.app`. The user authenticates with their AD credentials there and is redirected back. The proxy sets a `_oauth2_proxy_claw` cookie valid for 7 days.
+To add a permitted email: edit `allowed-emails.txt`, commit, pull on server, then:
 
-**To update which email addresses are permitted:** edit `oauth2-proxy/allowed-emails.txt` and run `docker compose up -d --force-recreate` from `oauth2-proxy/`.
+```bash
+cd /worksp/hiclaw/oauth2-proxy && docker compose up -d --force-recreate
+```
 
-**To rotate credentials:** update `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` in `oauth2-proxy/.env`, get new values from the Authentik admin UI at `https://auth.designflow.app` → Applications → HiClaw → Provider.
+To rotate credentials: update `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` in `oauth2-proxy/.env` (not committed). Get new values from Authentik admin UI → Applications → HiClaw → Provider.
 
-## Release/Change Management
+## Release / Change Management
 
-For changes in this repo:
+1. Edit on the host or in a local branch
+2. Validate against the running system
+3. Commit with a clear imperative message
+4. Push to `main`
+5. Pull on server: `cd /worksp/hiclaw && git pull`
+6. Apply (see above)
 
-1. edit the host-owned script or config
-2. validate it against the running deployment
-3. ensure the change is reflected in docs
-4. keep the host copy authoritative so cron can restore it later
-
-There is no separate publish step unless you are also changing the upstream HiClaw image outside this repo.
+No separate publish step for shell scripts or configs. Only `novnc-desktop/` changes trigger a CI build.

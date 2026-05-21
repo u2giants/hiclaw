@@ -4,133 +4,54 @@
 
 ### `workspace/openclaw.json`
 
-Path:
+- Host path: `/worksp/hiclaw/workspace/openclaw.json`
+- Manager container path: `/root/manager-workspace/openclaw.json`
+- Controller container path: `/root/hiclaw-fs/agents/manager/openclaw.json`
 
-- host: [workspace/openclaw.json](/worksp/hiclaw/workspace/openclaw.json)
-- manager container: `/root/manager-workspace/openclaw.json`
+This file has three concurrent writers: the controller reconciler, the OpenClaw gateway, and `manager-config-keeper.sh`. OpenClaw also tracks a backup at `workspace/.openclaw/openclaw.json.bak` and a health baseline at `workspace/.openclaw/logs/config-health.json` — both are used by observe-recovery to revert "unexpected" changes. `manager-config-keeper.sh` keeps `config-health.json` in sync whenever it edits `openclaw.json` so observe-recovery does not overwrite the keeper's fixes.
 
-Purpose:
+### Host-managed scripts
 
-- live OpenClaw gateway config for `hiclaw-manager`
-- shared between the manager and controller
-
-Important behavior:
-
-- this file is not single-writer
-- controller reconciliation, manager startup, and repair scripts all mutate it
-- OpenClaw health/backup state under `workspace/.openclaw/` can revert changes if the health metadata no longer matches the file
-
-### Host-managed startup patch
-
-Path:
-
-- [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh)
-
-Purpose:
-
-- authoritative patched copy of the manager startup script
-- copied into `hiclaw-manager` by `manager-bootstrap-keeper.sh`
-
-### Host-managed controller startup patch
-
-Path:
-
-- [start-element-web.sh](/worksp/hiclaw/start-element-web.sh)
-
-Purpose:
-
-- authoritative patched copy of the controller Element Web startup script
-- copied into `hiclaw-controller` by `controller-bootstrap-keeper.sh`
-- injects the `New Chat` and `Control Panel` browser affordances
-- starts the controller-local new-chat helper API
+| Script | Purpose | Persistent how |
+|---|---|---|
+| `start-manager-agent.sh` | Manager startup; ClawTalk bootstrap; k8s MinIO sync | Copied into container by `manager-bootstrap-keeper.sh` |
+| `start-element-web.sh` | Controller Element Web startup; nginx config; New Chat API | Copied into controller by `controller-bootstrap-keeper.sh` |
+| `manager-config-keeper.sh` | Stabilizes `openclaw.json`; runs from host directly | Host cron, every minute |
+| `manager-bootstrap-keeper.sh` | Re-applies startup script after container recreation | Host cron, every minute |
+| `controller-bootstrap-keeper.sh` | Re-applies controller startup script after recreation | Host cron, every minute |
+| `mcp-keeper.sh` | Re-adds browser MCP block to `openclaw.json` | **Not in cron** — run manually when needed |
 
 ### Keeper state
 
-Path:
+`.state/manager-bootstrap-keeper.last-container` and `.state/controller-bootstrap-keeper.last-container` record the last container ID that received the patched script, so keepers skip containers they have already patched.
 
-- `.state/manager-bootstrap-keeper.last-container`
+---
 
-Purpose:
-
-- remembers which running container ID already received the patched startup script
-
-## Current Managed OpenClaw Behavior
+## Managed openclaw.json Settings
 
 ### `commands.restart`
 
-Effective policy:
+**Effective behavior:** The startup script (`start-manager-agent.sh`) sets `commands.restart = true` at startup. The gateway processes this as a "reload now" signal within seconds, then clears `commands` to `{}`. The keeper (`manager-config-keeper.sh`) then normalizes `commands: {}` in the file to match the gateway's cleared running state.
 
-- always forced to `true`
+**Why not just leave it `true`:** The controller writes its reconciliation template every ~5 minutes with `commands: {restart: true, native: "auto", ...}`. If the file contains a non-empty `commands` object when the keeper fixes the schema, the gateway sees a state change in `commands` (running `{}` vs file non-empty) and triggers another restart. Setting `commands: {}` in the file means this diff never occurs.
 
-Why:
+**What the keeper actually writes:** `commands: {}` — not `commands.restart: true`. The startup `true` is consumed immediately and is not the steady-state value.
 
-- in this deployment, `false` causes a controller-triggered restart loop
-
-Owners:
-
-- startup patch in [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh:710)
-- fallback repair in [manager-config-keeper.sh](/worksp/hiclaw/manager-config-keeper.sh:1)
+**Do not change:** If you set `commands.restart = false` anywhere in this path, the controller will later write `true`, the gateway will see a `false → true` transition, and trigger a restart loop. If you leave `commands` non-empty after the initial startup, the 5-minute controller reconciliation will restart the gateway on every cycle. See Critical Incidents 1 and 2 in AGENTS.md.
 
 ### `session.dmScope`
 
-Effective policy:
+Effective policy: always `"main"`.
 
-- always forced to `main`
+The manager's main OpenClaw session key is `agent:main:main`. Forcing all Matrix DMs onto this session means the HiClaw chat UI and OpenClaw web chat share one transcript. Without this, each DM thread gets its own isolated session and the two UIs diverge.
 
-Why:
+This only affects direct messages. Matrix private/group rooms still use separate group-session keys. If the admin wants a parallel conversation, create a new Matrix room (use the "+ New Chat" button in Element Web or the skill at `workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh`).
 
-- this makes HiClaw Matrix direct messages reuse the same OpenClaw session as the web chat
-- without it, Matrix DMs land in per-channel sessions and the two UIs look disconnected even when the manager is healthy
+### `channels.matrix.groups.*`
 
-Owners:
+The controller writes `allow: true` in matrix group configs; the OpenClaw schema requires `enabled: true`. The keeper migrates `allow → enabled` on every run. This migration is why the keeper exists at all — without it, the gateway would permanently skip config reloads due to schema errors.
 
-- startup patch in [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh:707)
-- fallback repair in [manager-config-keeper.sh](/worksp/hiclaw/manager-config-keeper.sh:1)
-
-Important behavior:
-
-- this only affects direct messages
-- Matrix private/group rooms still use separate group/channel session keys
-- if the admin wants another simultaneous conversation in HiClaw, the correct path is a new room, not another DM
-
-### HiClaw separate-chat helper
-
-Path:
-
-- host / workspace: [workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh](/worksp/hiclaw/workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh)
-
-Purpose:
-
-- creates a new private HiClaw room for a separate admin conversation
-- invites `@manager` and sends the first `@mention` automatically
-
-Important behavior:
-
-- this helper lives in `workspace/`, so it survives `hiclaw-manager` container recreation
-- it depends on `HICLAW_ADMIN_PASSWORD` being present in the manager runtime environment
-- it intentionally does not create a direct-message room, because DMs are pinned to the main session by `session.dmScope = "main"`
-
-### Controller new-chat API
-
-Path:
-
-- generated inside `hiclaw-controller` at `/opt/element-web/hiclaw-chat-api.py`
-- exposed through Element Web nginx at `/hiclaw-api/new-chat`
-
-Purpose:
-
-- powers the HiClaw `New Chat` button in the browser UI
-- creates a new private admin room and sends the initial `@manager` message
-
-Important behavior:
-
-- this API is recreated on every controller boot by [start-element-web.sh](/worksp/hiclaw/start-element-web.sh)
-- it assumes a single human admin account for the deployment
-- it is intentionally same-origin behind the existing HiClaw UI host rather than a separate public service
-
-### ClawTalk plugin config
-
-Managed entry:
+### `plugins.entries.clawtalk`
 
 ```json
 "plugins": {
@@ -138,7 +59,7 @@ Managed entry:
     "clawtalk": {
       "enabled": true,
       "config": {
-        "apiKey": "...",
+        "apiKey": "cc_live_...",
         "autoConnect": true
       }
     }
@@ -146,49 +67,24 @@ Managed entry:
 }
 ```
 
-Important behavior:
+The startup script adds this entry if absent. `plugins.load.paths` must not include the ClawTalk npm path — the keeper removes it if present because ClawTalk loads from the bundled shim at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`, not from the npm location.
 
-- `plugins.load.paths` must not be used for ClawTalk in this deployment
-- stale `installRecords.clawtalk` must not be present
-- the startup patch rebuilds a bundled shim under `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk`
-
-### WhatsApp channel baseline
-
-Managed behavior:
+### `plugins.entries.whatsapp` / `channels.whatsapp`
 
 ```json
 "plugins": {
-  "allow": ["whatsapp"],
-  "entries": {
-    "whatsapp": {
-      "enabled": true
-    }
-  },
-  "load": {
-    "paths": [
-      "/root/manager-workspace/.openclaw/npm/node_modules/@openclaw/whatsapp"
-    ]
-  }
+  "allow": ["whatsapp", "clawtalk"],
+  "entries": { "whatsapp": { "enabled": true } },
+  "load": { "paths": ["/root/manager-workspace/.openclaw/npm/node_modules/@openclaw/whatsapp"] }
 },
 "channels": {
-  "whatsapp": {
-    "enabled": true,
-    "dmPolicy": "pairing",
-    "groupPolicy": "allowlist"
-  }
+  "whatsapp": { "enabled": true, "dmPolicy": "pairing", "groupPolicy": "allowlist" }
 }
 ```
 
-Important behavior:
+Added by the startup script. WhatsApp auth state lives under `workspace/.openclaw/credentials/whatsapp/`. The channel is enabled but requires a separate `openclaw channels login --channel whatsapp` pairing step before it can receive messages.
 
-- the host startup patch auto-installs `@openclaw/whatsapp` at the manager's OpenClaw version when the package is missing
-- WhatsApp auth state lives under `workspace/.openclaw/credentials/whatsapp/`
-- this deployment enables the channel but does not pre-authorize any phone numbers; first-contact DMs use OpenClaw pairing flow
-- linking still requires running `openclaw channels login --channel whatsapp` inside `hiclaw-manager` and scanning the QR code
-
-### Browser MCP config
-
-Managed by [mcp-keeper.sh](/worksp/hiclaw/mcp-keeper.sh:1):
+### Browser MCP
 
 ```json
 "mcp": {
@@ -201,50 +97,117 @@ Managed by [mcp-keeper.sh](/worksp/hiclaw/mcp-keeper.sh:1):
 }
 ```
 
-Important behavior:
+CDP endpoint `10.0.5.4:9223` is the static IP of the `novnc-desktop` container on the `e10kwzww46ljhrgz1qj08j6a` network. `mcp-keeper.sh` re-adds this block if the gateway strips it. `mcp-keeper.sh` is not in cron — run it manually if the browser tool disappears.
 
-- the gateway can strip unknown keys during MinIO sync
-- this block is not currently defended by a cron job
+### `agents.defaults.bootstrapMaxChars`
+
+Set to `20000` by the keeper so AGENTS.md (15k+ chars) is not truncated when the manager loads its bootstrap context.
+
+---
+
+## MinIO Storage Configuration
+
+The MinIO server runs inside `hiclaw-controller` on port 9000.
+
+| Setting | Value |
+|---|---|
+| `HICLAW_FS_ENDPOINT` | `http://hiclaw-controller:9000` |
+| `HICLAW_FS_ACCESS_KEY` | `default` |
+| `HICLAW_FS_SECRET_KEY` | set at deployment time, stored in container env |
+| `HICLAW_FS_BUCKET` | `hiclaw-storage` |
+| `HICLAW_STORAGE_PREFIX` | `hiclaw/hiclaw-storage` (mc alias + bucket combined) |
+
+In `mc` syntax: `hiclaw/hiclaw-storage/manager/` means mc alias `hiclaw`, bucket `hiclaw-storage`, object prefix `manager/`.
+
+### MinIO sync exclusions (CRITICAL)
+
+The k8s startup pull in `start-manager-agent.sh` includes these `--exclude` flags. **Do not remove them.** Each exclusion blocks a category of content that must not enter the workspace from MinIO:
+
+| Exclusion | Why |
+|---|---|
+| `hiclaw/*` | Local MinIO mirror (`hiclaw/hiclaw-storage/...`). If pulled into workspace, the controller's push creates a recursive path — the crash-causing bug of 2026-05-20 |
+| `hiclaw-fs` | Symlink to container-internal `/root/hiclaw-fs`, recreated fresh on each startup |
+| `*.clobbered.*` | Observe-recovery backup files — runtime noise, never needed in workspace |
+| `.npm/*` | npm cache — large, runtime, no value in MinIO |
+| `.codex/*` | Codex session state — runtime, no value in MinIO |
+| `.cache/*` | Generic cache directories |
+
+---
 
 ## Environment Variables
 
-This repo does not define the full HiClaw environment model. It only relies on a few variables directly.
+Variables used by this host-ops layer. The complete upstream HiClaw variable set is in `.env.example`.
 
-### Used directly by host-managed startup patch
+### MinIO and storage
 
-- `CLAWTALK_API_KEY`
-  - optional override for the default ClawTalk API key embedded in the startup patch
-  - consumed inside the patched manager startup flow
+| Variable | Used by | Description |
+|---|---|---|
+| `HICLAW_FS_ENDPOINT` | `start-manager-agent.sh` | MinIO server URL, e.g. `http://hiclaw-controller:9000` |
+| `HICLAW_FS_ACCESS_KEY` | `start-manager-agent.sh` | MinIO access key |
+| `HICLAW_FS_SECRET_KEY` | `start-manager-agent.sh` | MinIO secret key |
+| `HICLAW_FS_BUCKET` | `start-manager-agent.sh` | MinIO bucket name (`hiclaw-storage`) |
+| `HICLAW_STORAGE_PREFIX` | `start-manager-agent.sh` | Full object prefix including alias (`hiclaw/hiclaw-storage`) |
 
-### Used by the upstream manager startup behavior we intentionally preserve
+### Runtime mode
 
-- `HICLAW_MANAGER_RUNTIME`
-  - expected to remain `openclaw` for the current ClawTalk integration path
-- `HICLAW_MATRIX_DEBUG`
-  - if set to `1`, enables additional matrix plugin tracing in the manager startup path
-- `HICLAW_GITHUB_TOKEN`
-  - used by upstream manager startup logic to auto-configure GitHub MCP
+| Variable | Value | Effect |
+|---|---|---|
+| `HICLAW_RUNTIME` | `k8s` | Activates k8s startup block: `mc mirror` pulls from MinIO, creates `hiclaw-fs` symlink |
+| `HICLAW_MANAGER_RUNTIME` | `openclaw` | Selects OpenClaw gateway (vs CoPaw) |
 
-### Used directly by the controller chat UI patch
+### Manager identity
 
-- `HICLAW_ADMIN_USER`
-  - used by the controller-local new-chat API to authenticate as the human admin
-- `HICLAW_ADMIN_PASSWORD`
-  - required by the controller-local new-chat API
-- `HICLAW_MATRIX_URL`
-  - target Matrix API base URL used by the controller-local new-chat API
-- `HICLAW_MATRIX_DOMAIN`
-  - used to build the `@manager:<domain>` invite and mention target
+| Variable | Used by | Description |
+|---|---|---|
+| `HICLAW_MANAGER_GATEWAY_KEY` | startup, nginx token injection | OpenClaw gateway authentication key |
+| `HICLAW_MANAGER_PASSWORD` | startup, Matrix registration | Manager Matrix account password |
+| `HICLAW_MANAGER_NAME` | startup | Manager name (`default`) |
 
-### Values hardcoded in this host-ops layer
+### Controller / cluster
 
-- ClawTalk server URL defaults to `https://clawdtalk.com`
-- browser MCP CDP endpoint defaults to `http://10.0.5.4:9223`
-- `oauth2-proxy` OIDC provider and redirect URI are in `oauth2-proxy/docker-compose.yml`; client credentials (client ID, client secret, cookie secret) are in `oauth2-proxy/.env` (not committed)
+| Variable | Used by | Description |
+|---|---|---|
+| `HICLAW_CONTROLLER_URL` | startup | Controller API endpoint |
+| `HICLAW_ADMIN_USER` | startup, new-chat API | HiClaw admin username |
+| `HICLAW_ADMIN_PASSWORD` | startup, new-chat API | HiClaw admin password |
+| `HICLAW_REGISTRATION_TOKEN` | startup, tuwunel | Matrix homeserver registration token |
+| `HICLAW_AUTH_TOKEN` | startup | Long-lived JWT for controller auth |
+
+### Matrix
+
+| Variable | Used by | Description |
+|---|---|---|
+| `HICLAW_MATRIX_URL` | startup, new-chat API | Matrix homeserver internal URL (`http://hiclaw-controller:6167`) |
+| `HICLAW_MATRIX_DOMAIN` | startup, tuwunel | Matrix server domain (`matrix-local.hiclaw.io:18080`) |
+
+### LLM
+
+| Variable | Used by | Description |
+|---|---|---|
+| `HICLAW_LLM_API_KEY` | startup | OpenRouter API key |
+| `HICLAW_LLM_PROVIDER` | startup | LLM provider (`openai-compat`) |
+| `HICLAW_DEFAULT_MODEL` | startup | Default model (`deepseek/deepseek-v4-pro`) |
+
+### OAuth2 proxy (in `oauth2-proxy/.env`, not committed)
+
+| Variable | Description |
+|---|---|
+| `OAUTH2_CLIENT_ID` | Authentik OIDC client ID |
+| `OAUTH2_CLIENT_SECRET` | Authentik OIDC client secret |
+| `OAUTH2_PROXY_COOKIE_SECRET` | 32-byte base64 cookie signing secret |
+
+### Google SSO for Matrix (in `.env`, not committed)
+
+| Variable | Used by | Description |
+|---|---|---|
+| `GOOGLE_CLIENT_ID` | `start-tuwunel.sh` | Google OAuth client ID for native Matrix SSO |
+| `GOOGLE_CLIENT_SECRET` | `start-tuwunel.sh` | Google OAuth client secret |
+
+---
 
 ## Cron Configuration
 
-Current expected host crontab:
+Current host crontab (verify with `crontab -l`):
 
 ```cron
 * * * * * /worksp/hiclaw/manager-config-keeper.sh >> /worksp/hiclaw/manager-config-keeper.log 2>&1
@@ -252,31 +215,25 @@ Current expected host crontab:
 * * * * * /worksp/hiclaw/controller-bootstrap-keeper.sh >> /worksp/hiclaw/controller-bootstrap-keeper.log 2>&1
 ```
 
-Behavior:
+`mcp-keeper.sh` is **not in cron** — it modifies files inside the running manager container and is run manually when the browser MCP tool disappears.
 
-- `manager-config-keeper.sh` edits host files directly
-- `manager-bootstrap-keeper.sh` patches the running container and may restart it once when drift is detected
-- `controller-bootstrap-keeper.sh` patches the controller-side Element Web startup script and may restart `hiclaw-controller` once when drift is detected
-- `manager-bootstrap-keeper.sh` may briefly print `container startup script not readable yet; skipping this run` while `hiclaw-manager` is still booting
+---
 
 ## Logs and State Files
 
-- `manager-config-keeper.log`
-  - cron output for config repairs
-- `manager-bootstrap-keeper.log`
-  - cron output for startup patch repair
-- `controller-bootstrap-keeper.log`
-  - cron output for controller startup patch repair
-- `workspace/.openclaw/logs/config-health.json`
-  - OpenClaw config health baseline; can cause surprise restores
-- `workspace/.openclaw/clawtalk/ws.log`
-  - ClawTalk WebSocket log created by the startup shim path
+| File | Contents |
+|---|---|
+| `manager-config-keeper.log` | Keeper output — what it changed each minute |
+| `manager-bootstrap-keeper.log` | Bootstrap keeper output — patch applied / container restarted |
+| `controller-bootstrap-keeper.log` | Controller bootstrap keeper output |
+| `workspace/.openclaw/logs/config-health.json` | OpenClaw config health baseline — kept in sync by the config keeper |
+| `workspace/.openclaw/openclaw.json.bak` | OpenClaw backup — kept in sync by the config keeper to prevent observe-recovery rollbacks |
+| `workspace/.openclaw/clawtalk/ws.log` | ClawTalk WebSocket service log |
 
-## Intentional Smells
+---
 
-- The ClawTalk API key is present in host-managed scripts.
-  - That is not ideal.
-  - It is the current design because this host-ops layer is directly repairing runtime behavior for a single deployment.
-- `workspace/undefined/ws.log` may exist from earlier broken ClawTalk boots.
-  - That path came from the older unwrapped `resolvePath()` behavior.
-  - The current shim writes to `.openclaw/clawtalk/ws.log` instead.
+## Known Configuration Smells
+
+- **ClawTalk API key is hardcoded in `manager-config-keeper.sh`.** It belongs in an env var or secret store. Current design accepts this for a single-deployment host-ops layer.
+- **`fix-element-config.sh` hardcodes the manager gateway key** in the nginx `manager-console.conf` sub_filter template for auto-login token injection. This key is already in the manager container's environment — the hardcoded value is a convenience for the one-off repair script.
+- **`workspace/.openclaw/npm/node_modules/@openclaw/whatsapp` path** is hardcoded in `manager-config-keeper.sh`. It is the npm install path inside the manager container and does not vary across instances.

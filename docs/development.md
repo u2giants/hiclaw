@@ -2,47 +2,42 @@
 
 ## What "development" means here
 
-This repo is mostly shell scripts and deployment state. There is no local app build, test suite, or lint pipeline for a standalone product in this directory. The normal workflow is:
+This repo is shell scripts, a single Dockerfile, and deployment state. There is no local app build, test suite, or lint pipeline. Normal workflow:
 
-1. edit a host script or host-managed config
-2. syntax-check it
-3. apply it to the running containers if needed
-4. verify behavior with container logs and OpenClaw commands
+1. Edit a host script or config
+2. Syntax-check it
+3. Apply to running containers if needed
+4. Verify with container logs and OpenClaw commands
 
 ## Prerequisites
 
-- shell access on the host that owns `/worksp/hiclaw`
-- Docker CLI access
-- permission to edit the host crontab
-- a running `hiclaw-manager` container for most validations
+- SSH access to the host at `178.156.180.212`
+- Docker CLI access on the host
+- Permission to edit the host crontab (`crontab -e` as the deployment user)
+- For `novnc-desktop` image changes: a push to `main` triggers GitHub Actions — no local Docker build needed
 
-## Important Working Files
+## Key Working Files
 
-- [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh)
-  - Host-owned source of truth for the manager startup patch.
-- [manager-bootstrap-keeper.sh](/worksp/hiclaw/manager-bootstrap-keeper.sh)
-  - Applies the startup patch to new containers.
-- [manager-config-keeper.sh](/worksp/hiclaw/manager-config-keeper.sh)
-  - Repairs `workspace/openclaw.json`.
-- [start-element-web.sh](/worksp/hiclaw/start-element-web.sh)
-  - Host-owned source of truth for the controller chat UI startup patch.
-- [controller-bootstrap-keeper.sh](/worksp/hiclaw/controller-bootstrap-keeper.sh)
-  - Applies the controller startup patch to new `hiclaw-controller` containers.
-- [workspace/openclaw.json](/worksp/hiclaw/workspace/openclaw.json)
-  - Live shared manager/controller config.
-- [workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh](/worksp/hiclaw/workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh)
-  - Persistent helper for creating new HiClaw-only conversation rooms.
+| File | What it controls |
+|---|---|
+| `start-manager-agent.sh` | Manager startup, ClawTalk bootstrap, MinIO sync, openclaw.json initialization |
+| `start-element-web.sh` | Controller Element Web, nginx, New Chat API, manager console proxy |
+| `manager-config-keeper.sh` | `openclaw.json` stabilization (runs every minute via cron) |
+| `manager-bootstrap-keeper.sh` | Keeps startup script current in the manager container |
+| `controller-bootstrap-keeper.sh` | Keeps startup script current in the controller container |
+| `mcp-keeper.sh` | Re-adds browser MCP block (run manually) |
+| `novnc-desktop/novnc-startup.sh` | Chrome watchdog, CDP proxy, browser launch flags |
+| `novnc-desktop/cdp_proxy.py` | WebSocket proxy Chrome 9222→9223 (must be edited in-place — see below) |
+| `workspace/openclaw.json` | Live shared manager/controller config |
 
-## Safe Edit Workflow
+## Safe Edit Workflows
 
-### Startup path changes
-
-Use this when changing ClawTalk bootstrap or anything else in the manager startup script.
+### Manager startup script changes
 
 ```bash
-bash -n /worksp/hiclaw/start-manager-agent.sh
-bash /worksp/hiclaw/manager-bootstrap-keeper.sh
-docker logs hiclaw-manager --since 5m | grep -E 'Bootstrapping ClawTalk|ClawTalk|http server listening'
+bash -n /worksp/hiclaw/start-manager-agent.sh     # syntax check
+bash /worksp/hiclaw/manager-bootstrap-keeper.sh    # apply + restart if changed
+docker logs hiclaw-manager --since 5m | grep -E 'gateway|ClawTalk|error'
 docker exec hiclaw-manager openclaw clawtalk doctor
 ```
 
@@ -54,36 +49,68 @@ bash /worksp/hiclaw/manager-config-keeper.sh
 python3 -m json.tool /worksp/hiclaw/workspace/openclaw.json >/dev/null
 ```
 
-### HiClaw separate-chat helper changes
-
-```bash
-bash -n /worksp/hiclaw/workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh
-/worksp/hiclaw/workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh --help
-```
-
-### MCP repair changes
-
-```bash
-bash -n /worksp/hiclaw/mcp-keeper.sh
-bash /worksp/hiclaw/mcp-keeper.sh
-docker exec hiclaw-manager openclaw mcp list
-```
-
-### Controller chat UI startup changes
+### Controller Element Web changes
 
 ```bash
 bash -n /worksp/hiclaw/start-element-web.sh
 bash /worksp/hiclaw/controller-bootstrap-keeper.sh
-docker logs hiclaw-controller --since 5m | tail -n 100
-docker exec hiclaw-controller ps -ef | grep nginx | grep -v grep
+docker logs hiclaw-controller --since 5m | tail -50
 docker exec hiclaw-controller curl -s http://127.0.0.1:8088/hiclaw-api/healthz
 ```
 
+### oauth2-proxy changes (allowed emails, redirect URL)
+
+```bash
+# edit oauth2-proxy/allowed-emails.txt or oauth2-proxy/docker-compose.yml
+cd /worksp/hiclaw/oauth2-proxy
+docker compose up -d --force-recreate
+```
+
+### Traefik routing changes
+
+```bash
+# edit traefik/claw.yml
+docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml
+# Traefik hot-reloads automatically — no restart needed
+```
+
+### cdp_proxy.py changes
+
+```bash
+# Use the Edit tool or sed -i — never cp or Write (would create a new inode)
+# Docker bind mounts track the inode, not the path.
+# After editing in-place, the running novnc-desktop container sees the change immediately.
+```
+
+### novnc-desktop image changes
+
+```bash
+# Commit changes to novnc-desktop/ and push to main
+# GitHub Actions builds ghcr.io/u2giants/novnc-desktop:latest automatically
+# To apply the new image:
+docker pull ghcr.io/u2giants/novnc-desktop:latest
+docker stop novnc-desktop && docker rm novnc-desktop
+# then re-run the docker run command from docs/deployment.md
+```
+
+---
+
 ## Debugging
 
-### ClawTalk not connected
+### MinIO recursion check (run after every restart)
 
-Use these in order:
+```bash
+# Must print ONLY the root path. Extra lines = active recursion bug — stop containers immediately
+sudo find /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage \
+  -maxdepth 8 -type d -name "hiclaw-storage" -print
+
+# Must return "not found" — any result = recursion seed in workspace
+ls /worksp/hiclaw/workspace/hiclaw/ 2>/dev/null && echo "PROBLEM" || echo "OK"
+```
+
+If recursion is found, do not restart. Follow the recovery steps in [architecture.md § MinIO sync safety](architecture.md#minio-sync-safety).
+
+### ClawTalk not connected
 
 ```bash
 docker exec hiclaw-manager openclaw clawtalk doctor
@@ -91,25 +118,21 @@ docker logs hiclaw-manager --since 10m | grep -E 'clawtalk|ClawTalk'
 docker exec hiclaw-manager openclaw clawtalk logs --since 100
 ```
 
-What to look for:
-
+Look for:
 - `loading clawtalk from /usr/lib/node_modules/openclaw/dist/extensions/clawtalk/index.js`
 - `ClawTalk authenticated`
 - `ClawTalk service started`
 
-If the doctor loads the plugin but `bot_connected` is false, check the live gateway logs before assuming config is wrong. During startup there is a short period where the doctor can run before the gateway-side WebSocket has fully authenticated.
+If `bot_connected` is false immediately after startup, wait 10 seconds — the gateway-side WebSocket needs time to authenticate after the gateway starts.
 
 ### Manager restart loop
 
 ```bash
-docker logs hiclaw-manager --since 15m | grep -E 'commands.restart|SIGUSR1|restarting'
-python3 - <<'PY'
-import json
-print(json.load(open('/worksp/hiclaw/workspace/openclaw.json'))['commands']['restart'])
-PY
+docker logs hiclaw-manager --since 15m | grep -E 'commands|SIGUSR1|restarting|1012'
+python3 -c "import json; d=json.load(open('/worksp/hiclaw/workspace/openclaw.json')); print(d.get('commands'))"
 ```
 
-If `commands.restart` is not `true`, the config keeper or startup patch has drifted.
+Expected steady state: `commands` is `{}` (empty object). If it contains any keys, the keeper will normalize it within 60 seconds. If the manager is restarting every ~5 minutes, check `commands` and the `channels.matrix.groups` schema. See Critical Incidents 1 and 2 in AGENTS.md.
 
 ### Browser MCP disappeared
 
@@ -120,21 +143,22 @@ docker exec hiclaw-manager openclaw mcp list
 
 ### HiClaw chat UI looks disconnected or stale
 
-Check the controller-side Element Web loop first:
+Check for the stale nginx master first:
 
 ```bash
-docker logs hiclaw-controller --since 10m | tail -n 200
+docker logs hiclaw-controller --since 10m | tail -100
+docker exec hiclaw-controller ps -ef | grep nginx | grep -v grep
 docker exec hiclaw-controller sh -lc 'ss -ltnp | grep -E ":(8088|18888|8002)\\b" || true'
 ```
 
-If you see repeated `element-web exited` lines or `bind()` failures for `8088`, `18888`, or `8002`, the controller has stale nginx ownership and the UI layer is broken even if `hiclaw-manager` is still processing chat.
+Repeated `element-web exited` lines or `bind()` failures on ports 8088/18888/8002 mean the controller has a stale nginx master — run `bash /worksp/hiclaw/controller-bootstrap-keeper.sh`.
 
-If the `New Chat` button is visible but does nothing, check the controller-local helper:
+### New Chat button does nothing
 
 ```bash
 docker exec hiclaw-controller curl -s http://127.0.0.1:8088/hiclaw-api/healthz
 docker exec hiclaw-controller ps -ef | grep hiclaw-chat-api | grep -v grep
-docker exec hiclaw-controller tail -n 100 /var/log/hiclaw-chat-api.log
+docker exec hiclaw-controller tail -50 /var/log/hiclaw-chat-api.log
 ```
 
 ### Is the startup patch current?
@@ -143,43 +167,50 @@ docker exec hiclaw-controller tail -n 100 /var/log/hiclaw-chat-api.log
 bash /worksp/hiclaw/manager-bootstrap-keeper.sh
 ```
 
-Expected steady-state output:
+Expected: `startup patch already current for <container-id>`. Transient: `container startup script not readable yet; skipping this run` (the container is still booting — retry in 30 seconds).
 
-```text
-startup patch already current for <container-id>
+### openclaw.json validate
+
+```bash
+python3 -m json.tool /worksp/hiclaw/workspace/openclaw.json >/dev/null && echo OK || echo INVALID
 ```
 
-Possible transient output during container startup:
+### Keeper logs
 
-```text
-container startup script not readable yet; skipping this run
+```bash
+tail -30 /worksp/hiclaw/manager-config-keeper.log
+tail -30 /worksp/hiclaw/manager-bootstrap-keeper.log
+tail -30 /worksp/hiclaw/controller-bootstrap-keeper.log
 ```
 
-That is not a failure by itself. It means the container is still early in boot and the keeper should be retried after the process settles.
+---
 
-## There Is No Separate Build/Test System Here
+## There Is No Build/Test System
 
-- Build: none in this repo
-- Unit tests: none in this repo
-- Lint: no configured lint runner
-- Best available validation:
-  - `bash -n` for shell scripts
-  - `python3 -m json.tool` for JSON touched by scripts
-  - manual keeper execution
-  - `docker logs`
-  - `openclaw ... doctor` or other runtime inspection commands
+- Build: none for shell scripts; GitHub Actions for `novnc-desktop`
+- Unit tests: none
+- Lint: none — use `bash -n` for shell scripts, `python3 -m json.tool` for JSON
+- Best available validation: manual keeper execution + `docker logs` + `openclaw ... doctor`
+
+---
 
 ## Extending the System
 
-Prefer these patterns:
+### Extending startup behavior
 
-- host-owned script plus cron if the problem is caused by container recreation or an image reset
-- direct edits to `workspace/openclaw.json` only when the setting is truly persistent and not rewritten by another actor
-- startup-script patching only for behavior that must exist before the gateway starts
-- persistent `workspace/skills/...` helpers when the behavior belongs to the manager's ongoing operating model rather than container boot
+Edit `start-manager-agent.sh` for manager behavior, `start-element-web.sh` for controller/Element Web behavior. The keeper scripts detect changes (via sha256sum comparison) and apply them automatically.
 
-Avoid these patterns:
+### Adding an openclaw.json setting that must survive controller reconciliation
 
-- one-off `docker exec` fixes without a host-side keeper if the fix needs to survive recreation
-- editing mirrored files under `workspace/hiclaw/hiclaw-storage/...`
-- adding duplicate repair logic to multiple scripts when one existing keeper already owns that concern
+Add it to `manager-config-keeper.sh`. Make sure to also update `config-health.json` after writing (the script already does this — follow the same pattern).
+
+### Adding a MinIO sync exclusion
+
+Add `--exclude "<pattern>"` to the `mc mirror` call in `start-manager-agent.sh` lines 186-193. Never remove existing exclusions — they prevent the storage recursion bug.
+
+### Avoid these patterns
+
+- One-off `docker exec` fixes without a host-side keeper — they do not survive container recreation
+- Editing files under `workspace/hiclaw/hiclaw-storage/` — this path indicates the recursion bug has triggered
+- Running `mc mirror` inside the manager with the workspace as source and a MinIO manager path as destination without verifying the workspace does not contain a MinIO mirror subdirectory
+- Setting `commands.restart = false` anywhere — see AGENTS.md Idiosyncratic Decisions

@@ -2,117 +2,205 @@
 
 ## Scope
 
-This repo is a host-ops wrapper around a running HiClaw deployment. It does not build or publish the main Hiclaw application. Instead, it maintains the state and repair logic that make a specific deployment behave the way the operator expects.
+This repo is a host-ops wrapper around a running HiClaw deployment. It does not build or publish the main HiClaw application. It owns one Docker image (`novnc-desktop`), the host scripts and cron jobs that make a specific deployment behave correctly across restarts and container recreations, and the OAuth2 proxy sidecar.
 
-## Major Components
+## Component Map
 
-- `hiclaw-manager`
-  - Runs OpenClaw as the manager gateway.
-  - Uses `workspace/` as `/root/manager-workspace`.
-  - Starts from `/opt/hiclaw/scripts/init/start-manager-agent.sh` inside the container.
-- `hiclaw-controller`
-  - Reconciles manager config and other cluster state.
-  - Writes to the same `workspace/openclaw.json`.
-- Host workspace at `workspace/`
-  - Persistent volume shared with the manager container.
-  - Contains `openclaw.json`, agent memory, runtime state, skills, and mirrored artifacts.
-- Host keepers
-  - `manager-config-keeper.sh` stabilizes `workspace/openclaw.json`.
-  - `manager-bootstrap-keeper.sh` re-applies the patched manager startup script after container recreation.
-  - `controller-bootstrap-keeper.sh` re-applies the patched Element Web startup script after controller recreation.
-  - `mcp-keeper.sh` restores the browser MCP block when needed.
-- `oauth2-proxy`
-  - Protects `control.claw.designflow.app` and `gateway.claw.designflow.app`.
-  - Authenticates users via Authentik (self-hosted OIDC IdP at `auth.designflow.app`).
-  - Previously used Google OAuth; switched to Authentik 2026-05-09 so all logins go through the company AD.
-- noVNC / Playwright MCP path
-  - Separate browser automation path documented in [novnc-setup.md](/worksp/hiclaw/novnc-setup.md).
+### hiclaw-controller
 
-## Data Flow
+- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-embedded:v1.1.0`
+- Runs: MinIO (port 9000/9001), Higress console, Envoy, kube-apiserver, Tuwunel Matrix homeserver (port 6167), Element Web (nginx port 8088), manager-console proxy (port 18888)
+- Volume: `/var/lib/docker/volumes/hiclaw-data/_data` → `/data` (MinIO lives at `/data/minio/`)
+- Bind mounts:
+  - `/worksp/hiclaw/workspace` → `/root/hiclaw-fs/agents/manager`
+  - `/var/run/docker.sock` → `/var/run/docker.sock`
 
-### Manager startup
+### hiclaw-manager
 
-1. `hiclaw-manager` starts with the container image's startup script path.
-2. `manager-bootstrap-keeper.sh` compares the container's startup script with the host copy at [start-manager-agent.sh](/worksp/hiclaw/start-manager-agent.sh).
-3. If they differ, the keeper copies the host version into the container and restarts `hiclaw-manager` once.
-4. The patched startup script:
-   - keeps `commands.restart = true`
-   - bootstraps ClawTalk before `openclaw gateway run`
-   - rebuilds the bundled ClawTalk shim
-   - removes stale plugin precedence that prevents the gateway from loading ClawTalk
+- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager:v1.1.0`
+- Runs: OpenClaw gateway (Node.js), agent process
+- `HICLAW_RUNTIME=k8s` — confirmed active; this affects startup sync behavior (see below)
+- `HICLAW_MANAGER_RUNTIME=openclaw`
+- Bind mounts:
+  - `/worksp/hiclaw/workspace` → `/root/manager-workspace`
+  - `/home/ai` → `/host-share`
 
-### Controller chat UI startup
+### novnc-desktop
 
-1. `hiclaw-controller` starts `element-web` under supervisord via `/opt/hiclaw/scripts/init/start-element-web.sh`.
-2. In this deployment an older daemonized nginx master can survive long enough to keep ports `8088`, `18888`, and `8002` bound.
-3. When that happens, the supervisor-owned `element-web` process crash-loops on `bind()` errors and the HiClaw chat UI looks disconnected or stale.
-4. The host-owned [start-element-web.sh](/worksp/hiclaw/start-element-web.sh) now clears any stale nginx master before starting the foreground nginx process that supervisord expects to own.
-5. That same startup patch injects `control-panel-btn.js` and `new-chat-btn.js` into Element Web and launches a controller-local Python helper on `127.0.0.1:8091`.
-6. Nginx exposes the helper at `/hiclaw-api/new-chat`, so the HiClaw browser UI can create a separate manager room without opening OpenClaw.
+- Image: `ghcr.io/u2giants/novnc-desktop:latest` (only image built in this repo)
+- Runs: Chrome, noVNC, CDP proxy (`cdp_proxy.py` bridges Chrome 9222 → 9223)
+- Static IP `10.0.5.4` on network `e10kwzww46ljhrgz1qj08j6a`
+- Managed manually — not in Coolify
+
+### oauth2-proxy
+
+- OIDC provider: Authentik at `https://auth.designflow.app/application/o/hiclaw/`
+- Protects `control.claw.designflow.app` and `gateway.claw.designflow.app`
+- Cookie domain: `claw.designflow.app`
+- Permit list: `oauth2-proxy/allowed-emails.txt`
+
+## Critical Mount Relationship
+
+Both containers share the same host directory via different bind-mount paths:
+
+```
+Host: /worksp/hiclaw/workspace/
+  └── mounted as /root/manager-workspace/    in hiclaw-manager
+  └── mounted as /root/hiclaw-fs/agents/manager/   in hiclaw-controller
+```
+
+This means edits to the workspace by either container are immediately visible to the other. `workspace/openclaw.json` has three concurrent writers: the controller reconciler, the gateway, and `manager-config-keeper.sh`.
+
+## Data Flows
+
+### Manager startup (HICLAW_RUNTIME=k8s)
+
+`HICLAW_RUNTIME=k8s` is the active mode. The k8s startup block in `start-manager-agent.sh` (lines 171-196) runs on **every container start**:
+
+1. Configures `mc` alias pointing to the controller's MinIO (`http://hiclaw-controller:9000`)
+2. Pulls MinIO `hiclaw/hiclaw-storage/manager/` → `/root/manager-workspace/` (the workspace)
+3. Pulls MinIO `hiclaw/hiclaw-storage/` → `/root/hiclaw-fs/` (container-internal)
+4. Creates symlink `/root/manager-workspace/hiclaw-fs` → `/root/hiclaw-fs`
+
+Step 2 is the most dangerous step — see [MinIO sync safety](#minio-sync-safety).
+
+After the pull, the manager:
+- Bootstraps ClawTalk (creates bundled shim, clears `installs.json`)
+- Patches `openclaw.json` (sets `commands.restart = true` for initial gateway reload)
+- Starts the OpenClaw gateway
+
+### Controller's role in MinIO sync
+
+The controller's internal ManagerReconciler (proprietary code) pushes workspace content to MinIO `hiclaw/hiclaw-storage/manager/` periodically. Since it sees the workspace as `/root/hiclaw-fs/agents/manager/`, whatever is in the workspace at that path gets uploaded.
+
+**This is the push side of a bidirectional sync.** The manager pulls on startup; the controller pushes periodically. If the workspace contains a `hiclaw/hiclaw-storage/` subdirectory (from a previous pull), the push creates a recursive path in MinIO.
 
 ### Config stabilization
 
-1. `workspace/openclaw.json` is shared between the manager and controller.
-2. The manager startup script and controller both mutate it.
-3. OpenClaw also tracks health and backup state under `workspace/.openclaw/`.
-4. `manager-config-keeper.sh` edits the host copy directly to keep critical settings stable and to sync `config-health.json` when necessary.
+1. Controller reconciliation writes its template to `workspace/openclaw.json` every ~5 minutes, including `channels.matrix.groups.*: {allow: true}` (invalid schema) and a non-empty `commands` object.
+2. The gateway skips the reload due to the invalid `allow` field.
+3. `manager-config-keeper.sh` (runs every minute via cron) detects the drift, migrates `allow → enabled`, normalizes `commands: {}`, and syncs `config-health.json` so observe-recovery does not revert the fix.
+4. The gateway applies a hot reload (no restart, no dropped connections).
 
-### Chat session routing
+### Controller Element Web startup
 
-1. OpenClaw web chat uses the manager's main session key: `agent:main:main`.
-2. In this deployment, Matrix direct messages are intentionally forced onto that same main session with `session.dmScope = "main"`.
-3. That makes HiClaw DM chat and the OpenClaw web chat share one transcript instead of maintaining separate per-channel DM threads.
-4. Separate HiClaw conversations are therefore modeled as separate Matrix rooms, not separate DMs.
-5. Matrix group and private-room chats remain separate group/channel sessions.
+1. `hiclaw-controller` runs `start-element-web.sh` (host-owned, injected by `controller-bootstrap-keeper.sh`) as the supervisord Element Web component.
+2. The script generates `config.json`, `control-panel-btn.js`, `new-chat-btn.js`, `auth-ui-tweaks.js`, and `hiclaw-chat-api.py` into `/opt/element-web/`.
+3. It clears any stale nginx master (prevents crash-loop on port `8088`/`18888`/`8002`), starts `hiclaw-chat-api.py` on `127.0.0.1:8091`, then starts nginx in the foreground.
+4. nginx proxies `/hiclaw-api/new-chat` and `/hiclaw-api/matrix-auth` to the Python helper; serves Element Web on port 8088; serves the manager console (auto-token-injected) on port 18888; serves WASM plugins on port 8002.
 
-### HiClaw-only separate chat workflow
+### New Chat workflow
 
-1. The main admin DM remains the default conversation surface.
-2. When the admin asks for a separate conversation, the manager should create a new private Matrix room rather than asking the admin to use OpenClaw directly.
-3. The persistent helper for that lives at [workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh](/worksp/hiclaw/workspace/skills/matrix-server-management/scripts/create-admin-chat-room.sh).
-4. The helper logs in as the admin account, creates a `trusted_private_chat` room, invites `@manager`, and sends the initial `@mention` that activates the new OpenClaw room session.
-5. The browser-facing `New Chat` button now drives the same room-creation pattern through the controller-local `/hiclaw-api/new-chat` endpoint.
+1. Admin clicks "+ New Chat" in Element Web.
+2. Browser POSTs `{ name }` to `/hiclaw-api/new-chat` (proxied to `hiclaw-chat-api.py`).
+3. Python helper logs in as admin, creates a `trusted_private_chat` room with `@manager` invited, sends the initial `@mention` message.
+4. Browser polls the room list until it finds the new room and focuses it.
 
-### ClawTalk bootstrap path
+### Matrix DM routing
 
-1. The host-owned startup patch modifies the ClawTalk npm plugin manifest to declare startup activation, tool contracts, and the `clawtalk` command alias.
-2. It ensures `plugins.entries.clawtalk` exists in `openclaw.json`.
-3. It removes stale `installRecords.clawtalk`.
-4. It builds `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/` as a bundled shim.
-5. The shim wraps `resolvePath()` so ClawTalk gets a stable data directory and can open `ws.log` and start its WebSocket service reliably.
+`session.dmScope = "main"` in `openclaw.json` (enforced by `manager-config-keeper.sh`) collapses all Matrix direct messages into the same `agent:main:main` session used by OpenClaw web chat. This is intentional for the single-admin deployment model — both UIs stay in sync. Separate HiClaw conversations should be new Matrix rooms, not new DMs.
 
-## Constraints
+## MinIO Sync Safety
 
-- This repo does not control the upstream image contents. Container internals can be replaced by HiClaw upgrades or recreations.
-- `workspace/` is persistent, but files inside the container image are not.
-- The manager startup script inside the container is therefore a repair target, not a persistent storage location.
-- `workspace/openclaw.json` is not single-writer. Any design that assumes exclusive ownership will drift.
+**The most dangerous failure mode in this codebase.** Read this before touching any `mc mirror` call.
+
+### What the recursion looks like
+
+```
+MinIO bucket: hiclaw-storage
+Object key prefix: manager/
+Physical path: /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage/manager/
+
+Healthy state:
+  manager/openclaw.json
+  manager/AGENTS.md
+  manager/skills/...
+  manager/memory/...
+
+Recursive (broken) state:
+  manager/hiclaw/hiclaw-storage/manager/openclaw.json
+  manager/hiclaw/hiclaw-storage/manager/hiclaw/hiclaw-storage/manager/openclaw.json
+  ...  (grows one level per startup cycle)
+```
+
+### How the loop forms
+
+1. Manager startup pulls `hiclaw/hiclaw-storage/manager/` → workspace. If MinIO already has `manager/hiclaw/hiclaw-storage/` from a previous cycle, the workspace now contains `hiclaw/hiclaw-storage/` as a subdirectory.
+2. Controller's ManagerReconciler pushes workspace → `hiclaw/hiclaw-storage/manager/`, uploading the nested copy.
+3. Repeat: each startup adds one more nesting level.
+
+### The guard
+
+`start-manager-agent.sh` (lines 186-193) adds `--exclude` flags to the k8s startup pull:
+
+```bash
+mc mirror "${HICLAW_STORAGE_PREFIX}/manager/" /root/manager-workspace/ --overwrite \
+    --exclude "hiclaw/*" \
+    --exclude "hiclaw-fs" \
+    --exclude "*.clobbered.*" \
+    --exclude ".npm/*" \
+    --exclude ".codex/*" \
+    --exclude ".cache/*"
+```
+
+**Do not remove these exclusions.** They are the fix for the incident that caused a server crash on 2026-05-20.
+
+### Detection
+
+Run after every container startup:
+
+```bash
+sudo find /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage \
+  -maxdepth 8 -type d -name "hiclaw-storage" -print
+# Healthy: prints only the root path
+# Broken:  prints multiple lines (stop containers immediately)
+
+ls /worksp/hiclaw/workspace/hiclaw/ 2>/dev/null \
+  && echo "WARNING: recursion seed in workspace" \
+  || echo "OK"
+```
+
+### Recovery
+
+```bash
+docker stop hiclaw-manager hiclaw-controller
+
+# Remove recursion seed from workspace
+sudo rm -rf /worksp/hiclaw/workspace/hiclaw/
+sudo rm -f /worksp/hiclaw/workspace/hiclaw-fs
+
+# Remove recursive objects from MinIO (everything under manager/hiclaw/)
+# Use mc from inside a temporary container with MinIO access:
+#   mc rm --recursive hiclaw/hiclaw-storage/manager/hiclaw/
+
+# Restart in staged order
+docker start hiclaw-controller
+sleep 20
+sudo find /var/lib/docker/volumes/hiclaw-data/_data/minio/hiclaw-storage \
+  -maxdepth 4 -type d -name "hiclaw-storage" -print   # must show root only
+docker start hiclaw-manager
+sleep 30
+# Repeat the find check above
+```
+
+## openclaw.json.clobbered.* Files
+
+Files named `workspace/openclaw.json.clobbered.<timestamp>` are created by OpenClaw's observe-recovery mechanism when it detects a config hash mismatch. They are runtime noise from when the controller wrote an invalid config template and the keeper fixed it back — OpenClaw interpreted the keeper's write as an external "clobber". Accumulation of hundreds of these files was a symptom of the resolved 5-minute restart loop (Incident 2 in AGENTS.md).
+
+These files are pushed to MinIO as `manager/openclaw.json.clobbered.*` and accumulate there too. The startup pull `--exclude "*.clobbered.*"` prevents them from being restored to the workspace. Stale ones can be deleted from both locations safely.
+
+## What We Do Not Own
+
+- `hiclaw-controller` and `hiclaw-manager` image contents — managed by Alibaba/Higress
+- MinIO data model and reconciliation logic inside the controller
+- The OpenClaw gateway (`/usr/lib/node_modules/openclaw/`) — updated in-container by OpenClaw's own "Update now" flow
+- Tuwunel Matrix homeserver internal state at `/data/tuwunel/`
 
 ## Intentional Behaviors That Look Wrong
 
-- `commands.restart = true` is intentional.
-  - A new developer might assume `false` is safer.
-  - In this deployment it causes a controller-triggered restart loop because the controller later writes `true`, which OpenClaw interprets as a restart-triggering config change.
-- `manager-bootstrap-keeper.sh` patches a file inside a running container.
-  - That looks like an anti-pattern because it usually is.
-  - Here it is the practical persistence boundary because the actual image source tree is not available in this repo, while the host filesystem and cron are.
-- HiClaw direct chat and OpenClaw webchat intentionally collapse onto the same main session.
-  - This trades channel isolation for a simpler operator experience.
-- Separate HiClaw room chats still use separate session keys.
-  - Only direct-message continuity is shared with webchat.
-- A new developer might expect "new DM" to be the way to open another thread.
-  - That is not how this deployment works because DMs are deliberately collapsed into the main session.
-- A new developer might expect the `New Chat` frontend control to be implemented in an Element source repo.
-  - In this deployment it is intentionally injected at startup because the upstream frontend build tree is not part of this workspace.
-- `workspace/hiclaw/hiclaw-storage/...` recursive-looking content is not the application source tree.
-  - It is a mirrored artifact of the live manager workspace and MinIO sync path.
-  - Do not treat it as the authoritative location for edits.
-- `start-manager-agent.sh` in this repo is intentionally a forked copy of the in-container script.
-  - It exists so the host can restore required behavior after container recreation.
-
-## Integration Points
-
-- `fix-element-config.sh` patches `hiclaw-controller`, manager npm/mc wrappers, nginx config, and Docker network attachments after upgrades.
-- `start-element-web.sh` and `controller-bootstrap-keeper.sh` are the persistent repair path for the controller-side chat UI startup.
-- `oauth2-proxy/docker-compose.yml` defines the control UI auth sidecar. Provider is `oidc` pointed at `https://auth.designflow.app/application/o/hiclaw/`. Credentials are in `oauth2-proxy/.env` (not committed).
-- `novnc-setup.md` covers the browser/CDP path and the separate network dependency for the manager container.
+- **`start-manager-agent.sh` patches files inside a running container.** The keeper copies it into new containers on each recreation — this is the intended persistence boundary.
+- **`commands.restart = true` on startup, then `{}` during operation.** Setting `true` triggers the gateway's initial reload. The keeper then normalizes to `{}` so the controller's periodic template writes (which include `commands: {restart:true, ...}`) never appear as a state change and never trigger another restart. See [configuration.md § commands.restart](configuration.md#commandsrestart).
+- **`workspace/hiclaw/hiclaw-storage/` must not exist.** If it appears, it is a recursion indicator. Old docs called it a "mirrored artifact" — that framing was wrong; it is a bug artifact.
+- **`fix-element-config.sh` installs ephemeral patches inside containers.** The npm wrapper, mc wrapper, and some nginx config written by this script live only until the next container recreation. The persistent versions are delivered by `start-element-web.sh` (controller) and `start-manager-agent.sh` (manager) via the bootstrap keepers.
+- **`session.dmScope = "main"` is forced.** Multiple DMs with the same manager bot would create isolated per-channel sessions that never share context. The single-admin model intentionally avoids that by routing everything through `agent:main:main`.
+- **nginx stale master cleanup in `start-element-web.sh`.** The controller can retain an old daemonized nginx master across patching cycles. A second nginx instance causes Element Web to crash-loop on port conflicts. The cleanup runs on every controller startup to prevent this.
