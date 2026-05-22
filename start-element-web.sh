@@ -49,6 +49,30 @@ sed -i '1i worker_processes 2;' /etc/nginx/nginx.conf
 # This avoids adding 'unsafe-inline' to CSP, preserving XSS protection
 echo 'window.localStorage.setItem("mx_accepts_unsupported_browser","true");' > /opt/element-web/browser-bypass.js
 
+# Auto-login: after Google OAuth, seamlessly log the user into Matrix using a
+# short-lived login token from the hiclaw-chat-api. Checks localStorage first
+# so already-logged-in users are never interrupted.
+cat > /opt/element-web/auto-login.js << 'EOF'
+(function () {
+  // Skip if a Matrix session already exists in localStorage.
+  for (var i = 0; i < localStorage.length; i++) {
+    var k = localStorage.key(i);
+    if (k && k.indexOf('mx_access_token') !== -1 && localStorage.getItem(k)) return;
+  }
+  // Skip if we're already processing a login token (avoid redirect loop).
+  if (window.location.hash.indexOf('loginToken=') !== -1) return;
+
+  fetch('/hiclaw-api/matrix-auth', { method: 'POST' })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (data) {
+      if (data.login_token) {
+        window.location.replace('/#/login?loginToken=' + encodeURIComponent(data.login_token));
+      }
+    })
+    .catch(function () { /* API unavailable — user sees normal login screen */ });
+})();
+EOF
+
 cat > /opt/element-web/control-panel-btn.js << 'EOF'
 (function() {
   var ID = "hiclaw-cp-btn";
@@ -498,7 +522,7 @@ server {
     }
 
     # Inject external scripts rather than inline code so CSP stays intact.
-    sub_filter '</head>' '<script src="browser-bypass.js"></script><script src="auth-ui-tweaks.js"></script><script src="control-panel-btn.js"></script><script src="new-chat-btn.js"></script></head>';
+    sub_filter '</head>' '<script src="browser-bypass.js"></script><script src="auto-login.js"></script><script src="auth-ui-tweaks.js"></script><script src="control-panel-btn.js"></script><script src="new-chat-btn.js"></script></head>';
     sub_filter_once on;
     sub_filter_types text/html;
 
