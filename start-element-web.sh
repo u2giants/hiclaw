@@ -66,7 +66,7 @@ cat > /opt/element-web/auto-login.js << 'EOF'
     .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
     .then(function (data) {
       if (data.login_token) {
-        window.location.replace('/#/login?loginToken=' + encodeURIComponent(data.login_token));
+        window.location.replace('/?loginToken=' + encodeURIComponent(data.login_token));
       }
     })
     .catch(function () { /* API unavailable — user sees normal login screen */ });
