@@ -4,10 +4,9 @@ services:
     container_name: oauth2-proxy
     restart: unless-stopped
     command:
-      - --provider=oidc
-      - --oidc-issuer-url=https://auth.designflow.app/application/o/hiclaw/
-      - --client-id=${OAUTH2_CLIENT_ID}
-      - --client-secret=${OAUTH2_CLIENT_SECRET}
+      - --provider=google
+      - --client-id=${GOOGLE_CLIENT_ID}
+      - --client-secret=${GOOGLE_CLIENT_SECRET}
       - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET}
       - --redirect-url=https://control.claw.designflow.app/oauth2/callback
       - --cookie-domain=claw.designflow.app
@@ -21,7 +20,6 @@ services:
       - --set-xauthrequest=true
       - --pass-access-token=false
       - --upstream=static://202
-      - --insecure-oidc-allow-unverified-email
       - --skip-provider-button=true
       - --cookie-secure=true
       - --cookie-samesite=lax
