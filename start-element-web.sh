@@ -66,6 +66,8 @@ cat > /opt/element-web/auto-login.js << 'EOF'
     .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
     .then(function (data) {
       if (data.login_token) {
+        // Element reads homeserver URL from this key before exchanging the token.
+        localStorage.setItem('mx_sso_hs_url', window.location.origin);
         window.location.replace('/?loginToken=' + encodeURIComponent(data.login_token));
       }
     })
