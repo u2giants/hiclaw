@@ -60,7 +60,7 @@ cat > /opt/element-web/auto-login.js << 'EOF'
     if (k && k.indexOf('mx_access_token') !== -1 && localStorage.getItem(k)) return;
   }
   // Skip if we're already processing a login token (avoid redirect loop).
-  if (window.location.hash.indexOf('loginToken=') !== -1) return;
+  if (window.location.search.indexOf('loginToken=') !== -1) return;
 
   fetch('/hiclaw-api/matrix-auth', { method: 'POST' })
     .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
