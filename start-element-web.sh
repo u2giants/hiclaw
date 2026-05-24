@@ -49,27 +49,28 @@ sed -i '1i worker_processes 2;' /etc/nginx/nginx.conf
 # This avoids adding 'unsafe-inline' to CSP, preserving XSS protection
 echo 'window.localStorage.setItem("mx_accepts_unsupported_browser","true");' > /opt/element-web/browser-bypass.js
 
-# Auto-login: after Google OAuth, seamlessly log the user into Matrix using a
-# short-lived login token from the hiclaw-chat-api. Checks localStorage first
-# so already-logged-in users are never interrupted.
+# Auto-login: after Google OAuth, inject a Matrix session directly into
+# localStorage so Element starts in "restore session" mode and never shows
+# the "verify this device" cross-signing screen (which only appears after
+# a fresh token-based login via the SSO flow).
 cat > /opt/element-web/auto-login.js << 'EOF'
 (function () {
-  // Skip if a Matrix session already exists in localStorage.
-  for (var i = 0; i < localStorage.length; i++) {
-    var k = localStorage.key(i);
-    if (k && k.indexOf('mx_access_token') !== -1 && localStorage.getItem(k)) return;
-  }
-  // Skip if we're already processing a login token (avoid redirect loop).
-  if (window.location.search.indexOf('loginToken=') !== -1) return;
+  // Skip if a valid Matrix session already exists.
+  if (localStorage.getItem('mx_access_token') && localStorage.getItem('mx_user_id')) return;
 
-  fetch('/hiclaw-api/matrix-auth', { method: 'POST' })
+  fetch('/hiclaw-api/session', { method: 'POST' })
     .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
-    .then(function (data) {
-      if (data.login_token) {
-        // Element reads homeserver URL from this key before exchanging the token.
-        localStorage.setItem('mx_sso_hs_url', window.location.origin);
-        window.location.replace('/?loginToken=' + encodeURIComponent(data.login_token));
-      }
+    .then(function (d) {
+      if (!d.access_token) return;
+      localStorage.setItem('mx_hs_url',       window.location.origin);
+      localStorage.setItem('mx_access_token', d.access_token);
+      localStorage.setItem('mx_user_id',      d.user_id);
+      localStorage.setItem('mx_device_id',    d.device_id);
+      localStorage.setItem('mx_is_guest',     'false');
+      localStorage.setItem('mx_has_access_token', 'true');
+      localStorage.setItem('mx_has_pickle_key',   'false');
+      // Navigate without loginToken so Element uses restore-session path.
+      window.location.replace('/');
     })
     .catch(function () { /* API unavailable — user sees normal login screen */ });
 })();
@@ -118,10 +119,7 @@ cat > /opt/element-web/auth-ui-tweaks.js << 'EOF'
     "do this later",
     "not now",
     "later",
-    "skip",
-    "can't confirm?",
-    "i'll verify later",
-    "i don't want secure messages"
+    "skip"
   ];
 
   function normalize(text) {
@@ -458,6 +456,32 @@ def issue_login_token():
       fail(f"login token request failed: {body.get('error', body)}", 502)
     return {"login_token": login_token, "expires_in_ms": body.get("expires_in_ms", 0)}
 
+def issue_session():
+    """Password login with a fixed device_id so Element reuses the same device
+    and starts in restore-session mode, skipping the cross-signing verify screen."""
+    if not ADMIN_PASSWORD:
+      fail("HICLAW_ADMIN_PASSWORD not set", 500)
+    DEVICE_ID = "hiclaw_web_auto"
+    status, body = matrix_request(
+      "POST",
+      "/_matrix/client/v3/login",
+      {
+        "type": "m.login.password",
+        "identifier": {"type": "m.id.user", "user": ADMIN_USER},
+        "password": ADMIN_PASSWORD,
+        "device_id": DEVICE_ID,
+        "initial_device_display_name": "HiClaw Browser",
+      },
+    )
+    access_token = body.get("access_token")
+    if status != 200 or not access_token:
+      fail(f"session login failed: {body.get('error', body)}", 502)
+    return {
+      "access_token": access_token,
+      "user_id": body.get("user_id", f"@{ADMIN_USER}:{MATRIX_DOMAIN}"),
+      "device_id": body.get("device_id", DEVICE_ID),
+    }
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status, payload):
       body = json.dumps(payload).encode("utf-8")
@@ -475,6 +499,20 @@ class Handler(BaseHTTPRequestHandler):
       self._send(404, {"error": "not found"})
 
     def do_POST(self):
+      if self.path == "/session":
+        try:
+          self._send(200, issue_session())
+        except RuntimeError as exc:
+          code_text, _, message = str(exc).partition(":")
+          try:
+            code = int(code_text)
+          except ValueError:
+            code = 500
+            message = str(exc)
+          self._send(code, {"error": message})
+        except Exception as exc:
+          self._send(500, {"error": str(exc)})
+        return
       if self.path == "/matrix-auth":
         try:
           self._send(200, issue_login_token())
@@ -540,6 +578,14 @@ server {
 
     location = /hiclaw-api/new-chat {
         proxy_pass http://127.0.0.1:8091/new-chat;
+        proxy_http_version 1.1;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        add_header Cache-Control "no-store";
+    }
+
+    location = /hiclaw-api/session {
+        proxy_pass http://127.0.0.1:8091/session;
         proxy_http_version 1.1;
         proxy_read_timeout 30s;
         proxy_send_timeout 30s;
