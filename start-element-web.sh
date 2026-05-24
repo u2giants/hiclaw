@@ -195,6 +195,8 @@ cat > /opt/element-web/auth-ui-tweaks.js << 'EOF'
     });
   }
 
+  var skipVerificationLastClick = 0;
+
   function autoSkipVerification() {
     var bodyText = normalize(document.body && document.body.textContent);
     if (!bodyText) return;
@@ -203,10 +205,15 @@ cat > /opt/element-web/auth-ui-tweaks.js << 'EOF'
       return;
     }
 
+    // Cooldown: at most one click every 2 seconds to prevent observer loop freeze.
+    var now = Date.now();
+    if (now - skipVerificationLastClick < 2000) return;
+
     var buttons = Array.from(document.querySelectorAll("button, a[role='button'], a"));
     for (var i = 0; i < buttons.length; i++) {
       var text = normalize(buttons[i].textContent);
       if (SKIP_LABELS.indexOf(text) !== -1) {
+        skipVerificationLastClick = now;
         buttons[i].click();
         return;
       }
