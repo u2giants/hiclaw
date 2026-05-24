@@ -118,7 +118,10 @@ cat > /opt/element-web/auth-ui-tweaks.js << 'EOF'
     "do this later",
     "not now",
     "later",
-    "skip"
+    "skip",
+    "can't confirm?",
+    "i'll verify later",
+    "i don't want secure messages"
   ];
 
   function normalize(text) {
