@@ -248,20 +248,21 @@ Variables used by this host-ops layer. The complete upstream HiClaw variable set
 | `HICLAW_LLM_PROVIDER` | startup | LLM provider (`openai-compat`) |
 | `HICLAW_DEFAULT_MODEL` | startup | Default model (`deepseek/deepseek-v4-pro`) |
 
-### OAuth2 proxy (in `oauth2-proxy/.env`, not committed)
+### Google OAuth credentials (in `oauth2-proxy/.env`, not committed)
 
-| Variable | Description |
-|---|---|
-| `OAUTH2_CLIENT_ID` | Authentik OIDC client ID |
-| `OAUTH2_CLIENT_SECRET` | Authentik OIDC client secret |
-| `OAUTH2_PROXY_COOKIE_SECRET` | 32-byte base64 cookie signing secret |
-
-### Google SSO for Matrix (in `.env`, not committed)
+The same Google OAuth app credentials are used by both the auth proxy and the Matrix homeserver's SSO config.
 
 | Variable | Used by | Description |
 |---|---|---|
-| `GOOGLE_CLIENT_ID` | `start-tuwunel.sh` | Google OAuth client ID for native Matrix SSO |
-| `GOOGLE_CLIENT_SECRET` | `start-tuwunel.sh` | Google OAuth client secret |
+| `GOOGLE_CLIENT_ID` | `oauth2-proxy`, `start-tuwunel.sh` | Google OAuth client ID (`*.apps.googleusercontent.com`) |
+| `GOOGLE_CLIENT_SECRET` | `oauth2-proxy`, `start-tuwunel.sh` | Google OAuth client secret (`GOCSPX-...`) |
+| `OAUTH2_PROXY_COOKIE_SECRET` | `oauth2-proxy` | 32-byte base64 cookie signing secret |
+
+The Google Cloud Console OAuth app must have `https://control.claw.designflow.app/oauth2/callback` registered as an authorized redirect URI.
+
+To rotate credentials: update `oauth2-proxy/.env`, then `cd oauth2-proxy && docker compose up -d`.
+
+To extract the current cookie secret: `docker inspect oauth2-proxy | grep cookie-secret`.
 
 ---
 

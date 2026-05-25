@@ -132,7 +132,7 @@ docker logs hiclaw-manager --since 15m | grep -E 'commands|SIGUSR1|restarting|10
 python3 -c "import json; d=json.load(open('/worksp/hiclaw/workspace/openclaw.json')); print(d.get('commands'))"
 ```
 
-Expected steady state: `commands` is `{}` (empty object). If it contains any keys, the keeper will normalize it within 60 seconds. If the manager is restarting every ~5 minutes, check `commands` and the `channels.matrix.groups` schema. See Critical Incidents 1 and 2 in AGENTS.md.
+Expected steady state: `commands` is `{'restart': True}`. If it is `null`, `{}`, or `{'restart': False}`, the keeper will correct it within 60 seconds — but in the window before correction, the gateway may log a restart. If the manager is restarting every ~5 minutes, check `commands` and the `channels.matrix.groups` schema. See Critical Incidents 1 and 2 in AGENTS.md.
 
 ### Browser MCP disappeared
 
@@ -152,6 +152,56 @@ docker exec hiclaw-controller sh -lc 'ss -ltnp | grep -E ":(8088|18888|8002)\\b"
 ```
 
 Repeated `element-web exited` lines or `bind()` failures on ports 8088/18888/8002 mean the controller has a stale nginx master — run `bash /worksp/hiclaw/controller-bootstrap-keeper.sh`.
+
+### Google SSO / Element Web login not working
+
+**Symptom: Second login screen appears after Google OAuth.**
+
+```bash
+# Verify oauth2-proxy is running and using Google (not OIDC/Authentik)
+docker logs oauth2-proxy 2>&1 | grep "OAuthProxy configured"
+# Expected: "OAuthProxy configured for Google Client ID: 904..."
+```
+
+If it shows an OIDC issuer URL instead, the wrong provider is configured — check `oauth2-proxy/docker-compose.yml` and `oauth2-proxy/.env`.
+
+**Symptom: Element shows login form / welcome screen after Google auth.**
+
+Open browser DevTools → Console on `claw.designflow.app`. Look for `auto-login.js` errors. Then check:
+
+```bash
+# Is auto-login.js being served?
+docker exec hiclaw-controller curl -s http://127.0.0.1:8088/auto-login.js | head -5
+
+# Does the session endpoint work?
+docker exec hiclaw-controller curl -s -X POST http://127.0.0.1:8088/hiclaw-api/session
+# Expected: {"access_token": "...", "user_id": "@admin:...", "device_id": "hiclaw_web_auto"}
+
+# Is the Python helper running?
+docker exec hiclaw-controller ps -ef | grep hiclaw-chat-api | grep -v grep
+docker exec hiclaw-controller tail -20 /var/log/hiclaw-chat-api.log
+```
+
+If the session endpoint returns an error, the Python helper may have crashed or `HICLAW_ADMIN_PASSWORD` may not be set in the controller container's environment.
+
+**Symptom: Redirect loop (URL changing rapidly with different tokens).**
+
+`auto-login.js` is calling the session API repeatedly. This means the localStorage check is not finding the session. Possible causes: the keys are being set but Element is immediately clearing them (crypto init conflict), or the script is loading before the localStorage write from a previous run completed. Force-clear and retry:
+
+```bash
+# In browser DevTools:
+localStorage.clear(); location.reload();
+```
+
+**Symptom: "We couldn't log you in / browser has forgotten it".**
+
+This error comes from Element's SSO callback path. Something is triggering the `/?loginToken=` flow instead of the direct localStorage injection. Check that `auto-login.js` in the container matches what is in `start-element-web.sh` (run the bootstrap keeper to force a resync).
+
+```bash
+bash /worksp/hiclaw/controller-bootstrap-keeper.sh
+```
+
+For full design context, see [architecture.md § Google SSO Auto-Login](architecture.md#google-sso-auto-login).
 
 ### New Chat button does nothing
 

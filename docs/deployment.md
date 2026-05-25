@@ -168,23 +168,27 @@ docker exec hiclaw-manager openclaw clawtalk doctor
 
 ## oauth2-proxy — Authentication Provider
 
-Provider: Authentik (company OIDC IdP at `https://auth.designflow.app`)
+Provider: Google OAuth direct (`--provider=google`). Authentik is no longer in the auth path.
 
 | Setting | Value |
 |---|---|
-| Provider | `oidc` |
-| OIDC issuer | `https://auth.designflow.app/application/o/hiclaw/` |
+| Provider | `google` |
 | Redirect URI | `https://control.claw.designflow.app/oauth2/callback` |
 | Cookie domain | `claw.designflow.app` and `*.claw.designflow.app` |
 | Allowed emails | `oauth2-proxy/allowed-emails.txt` |
+| Credentials file | `oauth2-proxy/.env` (not committed — see `oauth2-proxy/.env.example`) |
 
 To add a permitted email: edit `allowed-emails.txt`, commit, pull on server, then:
 
 ```bash
-cd /worksp/hiclaw/oauth2-proxy && docker compose up -d --force-recreate
+cd /worksp/hiclaw/oauth2-proxy && docker compose up -d
 ```
 
-To rotate credentials: update `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` in `oauth2-proxy/.env` (not committed). Get new values from Authentik admin UI → Applications → HiClaw → Provider.
+To rotate credentials: update `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `oauth2-proxy/.env`. Get new credentials from Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client IDs. The redirect URI `https://control.claw.designflow.app/oauth2/callback` must be registered there as an authorized redirect URI.
+
+After updating credentials, `docker compose up -d` picks up the new `.env` without a full recreate.
+
+**After any oauth2-proxy change, verify the Element Web auto-login still works** (open an incognito window and log in with Google — you should land directly in the chat without a second login step). See [architecture.md § Google SSO Auto-Login](architecture.md#google-sso-auto-login) for why this is sensitive.
 
 ## Release / Change Management
 

@@ -26,7 +26,7 @@ This repo is the host-side operations layer for a running HiClaw deployment. It 
 │   ├── novnc-startup.sh             ← Chrome watchdog, CDP proxy launcher
 │   └── cdp_proxy.py                 ← WebSocket proxy Chrome 9222→9223
 ├── oauth2-proxy/
-│   ├── docker-compose.yml           ← oauth2-proxy container (OIDC via Authentik)
+│   ├── docker-compose.yml           ← oauth2-proxy container (Google OAuth direct)
 │   └── allowed-emails.txt           ← permitted Google accounts
 ├── traefik/
 │   └── claw.yml                     ← Traefik dynamic config (copy of live /data/coolify/proxy/dynamic/claw.yml)
@@ -69,7 +69,7 @@ ls /worksp/hiclaw/workspace/hiclaw/ 2>/dev/null && echo "WARNING: recursion seed
 ## Known Intentional Behaviors
 
 - **`HICLAW_RUNTIME=k8s`** is the active runtime mode. This causes the manager startup script to pull MinIO content into the workspace on every container start. The pulls have strict `--exclude` guards to prevent a recursive storage loop — do not remove them. See [docs/architecture.md § MinIO sync safety](docs/architecture.md#minio-sync-safety).
-- **`commands.restart`**: startup forces it to `true` so the gateway does its initial reload. The keeper then normalizes `commands` to `{}` so the controller's periodic template writes never trigger another restart. This is deliberate — see [docs/configuration.md § commands.restart](docs/configuration.md#commandsrestart).
+- **`commands.restart`**: startup forces it to `true` so the gateway does its initial reload. The keeper writes `commands: {restart: true}` on every run — exactly matching the startup baseline — so the controller's periodic template writes never trigger another restart. This is deliberate — see [docs/configuration.md § commands.restart](docs/configuration.md#commandsrestart).
 - **`session.dmScope = "main"`** collapses Matrix DMs into the same session as OpenClaw web chat. Separate admin conversations should use new Matrix rooms, not new DMs.
 - **`start-manager-agent.sh`** in this repo is a forked copy of the in-container startup script. Container-internal copies are ephemeral; this host copy is the persistent source of truth.
 - **`workspace/`** contains agent runtime state, skills, memory, and MinIO-synced content. It looks like source code but it is a live volume. Do not edit files under `workspace/hiclaw/hiclaw-storage/` — that path should not exist at all (see MinIO recursion check above).

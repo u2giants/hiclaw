@@ -34,10 +34,12 @@ This repo is a host-ops wrapper around a running HiClaw deployment. It does not 
 
 ### oauth2-proxy
 
-- OIDC provider: Authentik at `https://auth.designflow.app/application/o/hiclaw/`
-- Protects `control.claw.designflow.app` and `gateway.claw.designflow.app`
-- Cookie domain: `claw.designflow.app`
+- Provider: Google OAuth direct (`--provider=google`)
+- Protects `control.claw.designflow.app`, `gateway.claw.designflow.app`, and `claw.designflow.app` (Element Web)
+- Redirect URI: `https://control.claw.designflow.app/oauth2/callback` (registered in Google Cloud Console)
+- Cookie domain: `claw.designflow.app` and `*.claw.designflow.app`
 - Permit list: `oauth2-proxy/allowed-emails.txt`
+- Credentials: `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `oauth2-proxy/.env` (not committed)
 
 ## Critical Mount Relationship
 
@@ -85,9 +87,23 @@ The controller's internal ManagerReconciler (proprietary code) pushes workspace 
 ### Controller Element Web startup
 
 1. `hiclaw-controller` runs `start-element-web.sh` (host-owned, injected by `controller-bootstrap-keeper.sh`) as the supervisord Element Web component.
-2. The script generates `config.json`, `control-panel-btn.js`, `new-chat-btn.js`, `auth-ui-tweaks.js`, and `hiclaw-chat-api.py` into `/opt/element-web/`.
-3. It clears any stale nginx master (prevents crash-loop on port `8088`/`18888`/`8002`), starts `hiclaw-chat-api.py` on `127.0.0.1:8091`, then starts nginx in the foreground.
-4. nginx proxies `/hiclaw-api/new-chat` and `/hiclaw-api/matrix-auth` to the Python helper; serves Element Web on port 8088; serves the manager console (auto-token-injected) on port 18888; serves WASM plugins on port 8002.
+2. The script generates into `/opt/element-web/`:
+   - `config.json` — Element Web homeserver config
+   - `browser-bypass.js` — suppresses the "unsupported browser" banner
+   - `auto-login.js` — Google SSO auto-login bridge (see [Google SSO Auto-Login](#google-sso-auto-login))
+   - `auth-ui-tweaks.js` — styles SSO button; auto-skips E2E verification prompts
+   - `control-panel-btn.js` — injects the Control Panel link button
+   - `new-chat-btn.js` — injects the + New Chat button
+   - `hiclaw-chat-api.py` — Python HTTP helper on `127.0.0.1:8091`
+3. It clears any stale nginx master (prevents crash-loop on ports `8088`/`18888`/`8002`), starts `hiclaw-chat-api.py`, then starts nginx in the foreground.
+4. nginx injects all `.js` files above via `sub_filter` into every HTML response, and proxies:
+   - `/hiclaw-api/session` → Python helper `/session` (Matrix session credentials for auto-login)
+   - `/hiclaw-api/new-chat` → Python helper `/new-chat`
+   - `/hiclaw-api/matrix-auth` → Python helper `/matrix-auth` (legacy login-token flow, unused by auto-login)
+   - `/hiclaw-api/healthz` → Python helper `/healthz`
+   - Element Web itself on port 8088
+   - Manager console (auto-token-injected) on port 18888
+   - WASM plugins on port 8002
 
 ### New Chat workflow
 
@@ -95,6 +111,64 @@ The controller's internal ManagerReconciler (proprietary code) pushes workspace 
 2. Browser POSTs `{ name }` to `/hiclaw-api/new-chat` (proxied to `hiclaw-chat-api.py`).
 3. Python helper logs in as admin, creates a `trusted_private_chat` room with `@manager` invited, sends the initial `@mention` message.
 4. Browser polls the room list until it finds the new room and focuses it.
+
+### Google SSO Auto-Login
+
+**Context:** This is a solved problem that took significant effort to get right. The design is non-obvious. Do not change it without reading this section.
+
+#### The double-login problem
+
+oauth2-proxy gates every web-facing service with Google OAuth. After passing that gate, the user lands on Element Web — which is a Matrix client and requires a separate Matrix account login. Without auto-login, the user must authenticate twice: once with Google, and once with a Matrix username/password.
+
+Previously this was solved by routing both auth layers through Authentik (an OIDC identity provider). Authentik maintained a session after the first Google login, so when Element Web's SSO flow redirected to Authentik a second time, Authentik recognized the session and returned the user to Element already authenticated. Switching to direct Google OAuth (bypassing Authentik) broke this — there is no shared session for Element's SSO to tap.
+
+#### The solution: localStorage session injection
+
+`auto-login.js` is injected into every Element Web HTML response (via nginx `sub_filter`). On page load it:
+
+1. Checks `localStorage` for an existing Matrix session (`mx_access_token` + `mx_user_id`). If both exist, exits immediately — the user is already logged in.
+2. POSTs to `/hiclaw-api/session` — the Python helper does a Matrix password login with a **fixed `device_id` of `hiclaw_web_auto`** and returns `{access_token, user_id, device_id}`.
+3. Writes 7 keys into `localStorage`:
+
+   | Key | Value |
+   |-----|-------|
+   | `mx_hs_url` | `window.location.origin` |
+   | `mx_access_token` | access token from step 2 |
+   | `mx_user_id` | Matrix user ID |
+   | `mx_device_id` | `hiclaw_web_auto` |
+   | `mx_is_guest` | `false` |
+   | `mx_has_access_token` | `true` |
+   | `mx_has_pickle_key` | `false` |
+
+4. Calls `window.location.replace('/')` — navigates to `/` with no query params.
+
+Element Web starts, finds the pre-populated `localStorage`, and enters its **restore-session code path** (`loadSession()`) rather than its **fresh-login code path** (`onLoggedIn()` → `postLoginSetup()`). The restore path does not trigger the cross-signing verification screen.
+
+#### Why not `/?loginToken=<token>`
+
+This was tried first (and failed three separate ways):
+
+1. **Wrong location for token:** Element 1.12.10 reads `loginToken` from `window.location.search` (real query string), not the hash fragment. Putting it in `/#/login?loginToken=...` was silently ignored.
+2. **Missing homeserver in storage:** When `loginToken` is in the query string, Element calls `trySsoLogin()` which reads the homeserver URL from `localStorage.getItem('mx_sso_hs_url')`. Without that key, it shows "browser has forgotten which homeserver you use."
+3. **Cross-signing verification screen:** Even after both fixes above, Element exchanged the token and called `postLoginSetup()`. The admin account has cross-signing keys set up, so `userHasCrossSigningKeys()` returned true and Element showed "Confirm your identity / Verify this device."
+
+The verification screen has no "skip" button — only "Use another device", "Can't confirm?", and "Sign out". "Can't confirm?" opens a **reset identity** dialog, not a skip. Attempting to auto-click through it caused a MutationObserver feedback loop that froze the browser. The root cause: every `loginToken` exchange creates a new Matrix device (no `device_id` is specified), and Element asks to verify every new device against the cross-signing trust chain.
+
+#### Why the fixed device_id matters
+
+Password login with a fixed `device_id` (`hiclaw_web_auto`) either creates that device (first time) or reissues an access token for the existing device (every subsequent time). The homeserver keeps the device record; Element treats it as a known session. Since the device is never "new", the cross-signing verification screen never appears after the first login.
+
+On the first-ever login (e.g., on a fresh server), the device is created and Element will show the verification screen once. After that, every login reuses the existing device and goes straight to the chat.
+
+#### Session lifecycle
+
+- **Incognito / cleared localStorage:** `auto-login.js` fires, fetches a fresh access token for `hiclaw_web_auto`, writes localStorage, navigates to `/`. The previous access token for that device is invalidated on the homeserver.
+- **Existing session:** `auto-login.js` exits at step 1 without any network request.
+- **Invalidated token (soft logout):** Element detects the 401, clears its own session, and redirects to the login screen. `auto-login.js` fires on the next page load and re-authenticates.
+
+#### What this is NOT
+
+This auto-login is for a single-admin personal deployment. Everyone in `oauth2-proxy/allowed-emails.txt` gets logged into the same Matrix admin account. This design is correct for the current deployment and must not be extended to multi-user without rethinking the entire auth model.
 
 ### Matrix DM routing
 
