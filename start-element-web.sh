@@ -628,12 +628,10 @@ server {
 NGINX
 
 # Generate Nginx config for Manager Console reverse proxy.
+# Uses Docker DNS resolver (127.0.0.11) with a variable upstream so nginx re-resolves
+# hiclaw-manager on each request — survives manager container restarts/IP changes.
 # OpenClaw runtime: injects gateway token via inline script for auto-login.
 # CoPaw runtime: plain reverse proxy, no token injection needed.
-HICLAW_MANAGER_IPV4="$(getent ahostsv4 hiclaw-manager 2>/dev/null | awk 'NR==1 {print $1}')"
-if [ -z "${HICLAW_MANAGER_IPV4}" ]; then
-    HICLAW_MANAGER_IPV4="127.0.0.1"
-fi
 if [ "${HICLAW_MANAGER_RUNTIME:-openclaw}" = "openclaw" ]; then
     OPENCLAW_TOKEN="${HICLAW_MANAGER_GATEWAY_KEY:-}"
     cat > /etc/nginx/conf.d/manager-console.conf << NGINX
@@ -643,11 +641,14 @@ if [ "${HICLAW_MANAGER_RUNTIME:-openclaw}" = "openclaw" ]; then
 # reads the token from the URL hash on load (both old and new versions support this).
 # CSP must be stripped to allow the inline script, and proxy headers (Host, X-Real-IP)
 # are omitted to avoid triggering untrusted-proxy detection in the gateway.
+# Uses Docker DNS resolver with variable upstream so manager IP changes don't break routing.
 server {
     listen 18888;
 
     location / {
-        proxy_pass http://${HICLAW_MANAGER_IPV4}:18799;
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set \$upstream hiclaw-manager;
+        proxy_pass http://\$upstream:18799;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -669,11 +670,14 @@ NGINX
 else
     cat > /etc/nginx/conf.d/manager-console.conf << 'NGINX'
 # Manager Console (CoPaw) — plain reverse proxy to the manager container
+# Uses Docker DNS resolver with variable upstream so manager IP changes don't break routing.
 server {
     listen 18888;
 
     location / {
-        proxy_pass http://__HICLAW_MANAGER_IPV4__:18799;
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $upstream hiclaw-manager;
+        proxy_pass http://$upstream:18799;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -682,7 +686,6 @@ server {
     }
 }
 NGINX
-    sed -i "s/__HICLAW_MANAGER_IPV4__/${HICLAW_MANAGER_IPV4}/g" /etc/nginx/conf.d/manager-console.conf
 fi
 
 # Generate Nginx config for Higress WASM plugin server (port 8002).
