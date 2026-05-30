@@ -1544,7 +1544,7 @@ else
     if [ -f /usr/lib/node_modules/openclaw/package.json ]; then
         sha256sum /usr/lib/node_modules/openclaw/package.json \
             | cut -d' ' -f1 \
-            > "${HOME}/.openclaw-startup-pkg-hash" 2>/dev/null || true
+            > "/root/manager-workspace/.openclaw-startup-pkg-hash" 2>/dev/null || true
         log "Recorded openclaw package hash for update detection"
     fi
 
