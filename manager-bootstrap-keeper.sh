@@ -57,9 +57,7 @@ else
         || echo "warning: docker update failed; container may be uncapped"
 
     if [ "${container_hash}" != "${host_hash}" ]; then
-        echo "restarting ${CONTAINER_NAME} to activate patched startup script"
-        docker restart "${CONTAINER_NAME}" >/dev/null
-        exit 0
+        echo "startup script patched in-place; will take effect on next natural restart (no restart triggered)"
     else
         echo "container was recreated; patched script restored without additional changes"
     fi

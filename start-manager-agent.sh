@@ -762,15 +762,18 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
     # OpenRouter is the authoritative source; the static known-models.json values
     # are often stale. Only models whose IDs match an OpenRouter model are updated —
     # gateway-alias models (e.g. "deepseek-chat", "gpt-5.4") are left as-is.
+    # Response is written to a temp file to avoid "Argument list too long" errors.
     if [ -n "${HICLAW_LLM_API_KEY:-}" ]; then
-        _or_models=$(curl -sf --max-time 10 \
+        curl -sf --max-time 10 \
             -H "Authorization: Bearer ${HICLAW_LLM_API_KEY}" \
-            "https://openrouter.ai/api/v1/models" 2>/dev/null || true)
-        if echo "${_or_models}" | jq -e '.data | length > 0' > /dev/null 2>&1; then
-            jq --argjson or_models "${_or_models}" '
+            "https://openrouter.ai/api/v1/models" \
+            -o /tmp/openrouter-models.json 2>/dev/null || true
+        if jq -e '.data | length > 0' /tmp/openrouter-models.json > /dev/null 2>&1; then
+            jq --slurpfile or_data /tmp/openrouter-models.json '
+                (($or_data[0].data | map({(.id): .}) | add) // {}) as $or_index |
                 (.models.providers["hiclaw-gateway"].models) |= map(
                     . as $m |
-                    ($or_models.data | map(select(.id == $m.id)) | first) as $or |
+                    $or_index[$m.id] as $or |
                     if $or then
                         $m
                         | .contextWindow = ($or.context_length // $m.contextWindow)
@@ -792,6 +795,7 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
         else
             log "OpenRouter model list unavailable; keeping existing metadata"
         fi
+        rm -f /tmp/openrouter-models.json
     fi
 
     # Disable openclaw's observe-recovery mechanism which compares config against
