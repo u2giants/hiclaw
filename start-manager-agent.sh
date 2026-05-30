@@ -790,6 +790,7 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
                 )
             ' /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp \
             && mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json \
+            && mc cp /root/manager-workspace/openclaw.json hiclaw/hiclaw-storage/manager/openclaw.json > /dev/null 2>&1 || true \
             && log "Model metadata synced from OpenRouter" \
             || log "Warning: OpenRouter model metadata sync failed (jq error); keeping existing values"
         else
