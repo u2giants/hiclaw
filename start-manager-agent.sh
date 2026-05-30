@@ -774,18 +774,12 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
                 (.models.providers["hiclaw-gateway"].models) |= map(
                     . as $m |
                     $or_index[$m.id] as $or |
-                    if $or then
+                    if $or and ($or.context_length // 0) > 0 then
                         $m
-                        | .contextWindow = ($or.context_length // $m.contextWindow)
-                        | .maxTokens     = ([($or.per_request_limits.max_completion_tokens // 0 | tonumber),
-                                             ($or.context_length // 0 | tonumber / 4 | floor),
-                                             ($m.maxTokens // 0)] | map(select(. > 0)) | min)
-                        | if $or.pricing then
-                              .pricing = {
-                                  "inputPerM":  ($or.pricing.prompt      | tonumber * 1000000 | round / 100),
-                                  "outputPerM": ($or.pricing.completion   | tonumber * 1000000 | round / 100)
-                              }
-                          else . end
+                        | .contextWindow = $or.context_length
+                        | .maxTokens     = ([$or.per_request_limits.max_completion_tokens // 0 | tonumber,
+                                             $m.maxTokens // 0]
+                                            | map(select(. > 0)) | min // $m.maxTokens)
                     else $m end
                 )
             ' /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp \
