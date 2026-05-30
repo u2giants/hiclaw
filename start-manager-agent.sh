@@ -757,6 +757,43 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
        ' \
        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
+
+    # Sync model metadata (contextWindow, maxTokens, pricing) from OpenRouter.
+    # OpenRouter is the authoritative source; the static known-models.json values
+    # are often stale. Only models whose IDs match an OpenRouter model are updated —
+    # gateway-alias models (e.g. "deepseek-chat", "gpt-5.4") are left as-is.
+    if [ -n "${HICLAW_LLM_API_KEY:-}" ]; then
+        _or_models=$(curl -sf --max-time 10 \
+            -H "Authorization: Bearer ${HICLAW_LLM_API_KEY}" \
+            "https://openrouter.ai/api/v1/models" 2>/dev/null || true)
+        if echo "${_or_models}" | jq -e '.data | length > 0' > /dev/null 2>&1; then
+            jq --argjson or_models "${_or_models}" '
+                (.models.providers["hiclaw-gateway"].models) |= map(
+                    . as $m |
+                    ($or_models.data | map(select(.id == $m.id)) | first) as $or |
+                    if $or then
+                        $m
+                        | .contextWindow = ($or.context_length // $m.contextWindow)
+                        | .maxTokens     = ([($or.per_request_limits.max_completion_tokens // 0 | tonumber),
+                                             ($or.context_length // 0 | tonumber / 4 | floor),
+                                             ($m.maxTokens // 0)] | map(select(. > 0)) | min)
+                        | if $or.pricing then
+                              .pricing = {
+                                  "inputPerM":  ($or.pricing.prompt      | tonumber * 1000000 | round / 100),
+                                  "outputPerM": ($or.pricing.completion   | tonumber * 1000000 | round / 100)
+                              }
+                          else . end
+                    else $m end
+                )
+            ' /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp \
+            && mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json \
+            && log "Model metadata synced from OpenRouter" \
+            || log "Warning: OpenRouter model metadata sync failed (jq error); keeping existing values"
+        else
+            log "OpenRouter model list unavailable; keeping existing metadata"
+        fi
+    fi
+
     # Disable openclaw's observe-recovery mechanism which compares config against
     # a lastKnownGood baseline in config-health.json. When meta is missing from the
     # current file but present in the baseline, observe-recovery restores from .bak,
