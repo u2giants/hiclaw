@@ -1538,6 +1538,15 @@ else
     rm -rf "${HOME}/.openclaw/matrix" 2>/dev/null || true
     log "Cleaned Matrix crypto storage (will re-establish E2EE sessions)"
 
+    # If openclaw was updated via npm install -g, the npm-installed binary at
+    # /usr/lib/node_modules/openclaw/ takes precedence over the image built-in
+    # at /opt/openclaw/. Ensure /usr/local/bin/openclaw symlink points to the
+    # npm version so 'exec openclaw' below picks it up correctly.
+    if [ -f /usr/lib/node_modules/openclaw/openclaw.mjs ]; then
+        ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
+        log "OpenClaw symlink updated → npm-installed version"
+    fi
+
     # Record openclaw package hash so the host-side bootstrap keeper can detect
     # in-container updates and trigger a container restart (in-process restarts
     # don't reload new hash-stamped module files — see Idiosyncratic Decision #5).
