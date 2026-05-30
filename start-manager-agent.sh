@@ -758,7 +758,13 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
 
-    # Sync model metadata (contextWindow, maxTokens, pricing) from OpenRouter.
+    # Strip fields openclaw's model schema does not accept (e.g. 'pricing' added
+    # by a previous buggy sync run and preserved in MinIO).
+    jq '(.models.providers["hiclaw-gateway"].models) |= map(del(.pricing))' \
+        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
+        mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
+
+    # Sync model metadata (contextWindow, maxTokens) from OpenRouter.
     # OpenRouter is the authoritative source; the static known-models.json values
     # are often stale. Only models whose IDs match an OpenRouter model are updated —
     # gateway-alias models (e.g. "deepseek-chat", "gpt-5.4") are left as-is.
