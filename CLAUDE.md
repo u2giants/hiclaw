@@ -14,14 +14,13 @@ AGENTS.md is the authoritative source of truth. Memory files supplement it with 
 
 `.claudeignore` excludes `workspace/`, `.state/`, and `*.log` — do not index these.
 
-The `workspace/` directory is large runtime data. Never read or modify files there unless directly debugging OpenClaw config (`workspace/openclaw.json` is the one exception you may touch).
+Never read or modify files in `workspace/` unless directly debugging OpenClaw config (`workspace/openclaw.json` is the one exception).
 
 ## Operations Permissions
 
 - **Docker:** full access — `docker exec`, `docker inspect`, `docker restart` on any hiclaw container
-- **Git:** push to `u2giants/hiclaw` on GitHub, set repo secrets
+- **Git:** push to `u2giants/hiclaw` on GitHub
 - **Coolify API:** `https://coolify.designflow.app` — full API access
-- **Server files:** read/write anything in `/worksp/hiclaw/` except `workspace/` (read-only except `openclaw.json`)
 - **Do not SSH as deployment method** — code changes go through git → GitHub Actions → Coolify
 
 ## Commit Style
@@ -36,10 +35,9 @@ The `workspace/` directory is large runtime data. Never read or modify files the
 - Use `gh` CLI for GitHub operations over raw curl
 - When editing `cdp_proxy.py` on the server, use Edit tool (preserves inode) — never Write or cp
 
-## Key Facts for This Session
+## Key Facts
 
 - Owner: Albert (business owner, not a developer — do everything yourself)
 - Server: `178.156.180.212`
 - The only Docker image built from this repo: `ghcr.io/u2giants/novnc-desktop`
 - hiclaw-manager and hiclaw-controller are NOT in Coolify — managed by keeper scripts
-- Never set `commands.restart=false` in `workspace/openclaw.json`

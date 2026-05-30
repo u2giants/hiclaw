@@ -124,6 +124,9 @@ Changes made to files outside our own directories (upstream merge conflict check
 **I need to fix the OpenClaw gateway (in-process):**
 → Modify `/worksp/hiclaw/workspace/openclaw.json` directly (it's a host file) → the manager picks it up automatically
 
+**I need to change what Element Web shows at login or after Google OAuth:**
+→ Edit `start-element-web.sh` — it generates `auto-login.js`, `auth-ui-tweaks.js`, `control-panel-btn.js`, and the nginx `manager-console.conf` on container start → commit → pull on server → restart Element Web container
+
 ---
 
 ## 7. Task-to-File Navigation Map
@@ -141,11 +144,14 @@ Changes made to files outside our own directories (upstream merge conflict check
 | OpenClaw config watchdog | `manager-config-keeper.sh` |
 | hiclaw-controller crash recovery | `controller-bootstrap-keeper.sh` |
 | MCP server keepalive | `mcp-keeper.sh` |
-| Element Web container | `start-element-web.sh` |
+| Element Web container (nginx, JS injections, manager-console.conf) | `start-element-web.sh` |
 | Matrix homeserver (tuwunel) | `start-tuwunel.sh` |
 | OpenClaw runtime config | `/worksp/hiclaw/workspace/openclaw.json` (host file, not in git) |
 | GitHub Actions pipeline | `.github/workflows/build-and-push.yml` |
 | All env var documentation | `docs/configuration.md` + `.env.example` |
+| Auto-login after Google OAuth | `start-element-web.sh` → `auto-login.js` section |
+| nginx reverse proxy for control.claw (hiclaw-manager) | `start-element-web.sh` → `manager-console.conf` generation block |
+| Model context window metadata | `start-manager-agent.sh` OpenRouter sync block (~line 772) |
 
 ---
 
@@ -271,7 +277,9 @@ These exist on the server but are not in the repo and are not relevant to develo
 
 **Why:** Node.js module cache + `OPENCLAW_NO_RESPAWN=1` + hash-renamed files = stale references survive in-process restart. OpenClaw's own restart-after-update step also skips because it can't find a systemd service ("No installed gateway service found; skipped restart").
 
-**Prevention (implemented):** `start-manager-agent.sh` writes a hash of `/usr/lib/node_modules/openclaw/package.json` to `~/.openclaw-startup-pkg-hash` on each startup. The `manager-bootstrap-keeper.sh` (cron, every minute) reads this hash and compares it to the live package hash inside the running container. If they differ — indicating an in-container update ran — it calls `docker restart hiclaw-manager`, which starts fresh and loads the new module files correctly.
+**Prevention (implemented):** `start-manager-agent.sh` probes for the active openclaw `package.json` at startup (npm global install path `/usr/lib/node_modules/openclaw/package.json` first, then image built-in `/opt/openclaw/package.json`), hashes it, and writes the hash to `/root/manager-workspace/.openclaw-startup-pkg-hash` — which is bind-mounted at `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash` on the host. `manager-bootstrap-keeper.sh` (cron, every minute) reads the host-side hash file, computes the current hash from inside the running container using the same fallback probe, and calls `docker restart hiclaw-manager` when they differ.
+
+**Why the hash file is in the workspace volume:** An earlier bug wrote to `${HOME}/.openclaw-startup-pkg-hash` (inside the container overlay), which the host-side keeper could not read. The workspace directory (`/root/manager-workspace/`) is bind-mounted from the host, so files written there are immediately visible to the keeper. The path on the host is `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`.
 
 **Do not change because:** Removing the startup hash write or the keeper check means updates silently break the sentinel, future "Update now" clicks hang, and `openclaw doctor` is required to recover.
 
@@ -286,6 +294,74 @@ These exist on the server but are not in the repo and are not relevant to develo
 **Why:** The `index.cjs` wrapper does the unwrapping explicitly: `const m = require('./build/index.js'); module.exports = m.default || m;`
 
 **Do not change because:** Removing the wrapper causes clawtalk to fail to load in the gateway. **IMPORTANT: This wrapper lives inside the hiclaw-manager container and is lost on container restart. It must be recreated via `start-manager-agent.sh` or mounted from host. This is pending work.**
+
+---
+
+### nginx manager-console.conf uses Docker DNS resolver, not hardcoded IP
+
+**Looks like:** The simplest way to proxy from hiclaw-controller's nginx to hiclaw-manager is `proxy_pass http://<IP>:8080`.
+
+**Actually:** Docker reassigns container IPs when containers are recreated. After a `docker restart hiclaw-manager`, the IP changes and nginx starts returning 502 Bad Gateway for all control.claw requests — until the controller container is also restarted.
+
+**Why:** `start-element-web.sh` generates `manager-console.conf` with:
+```nginx
+resolver 127.0.0.11 valid=10s;
+set $upstream hiclaw-manager;
+proxy_pass http://$upstream:8080;
+```
+`127.0.0.11` is Docker's embedded DNS resolver. By storing the hostname in a variable, nginx bypasses its startup-time DNS cache and re-resolves `hiclaw-manager` on each request. This means IP changes are transparent.
+
+**Do not change because:** Switching back to a hardcoded IP causes 502s every time the manager container is recreated.
+
+---
+
+### OpenRouter model sync writes response to file, not shell variable
+
+**Looks like:** `MODELS=$(curl ... openrouter.ai/api/v1/models)` and then use `$MODELS` in a jq call.
+
+**Actually:** The OpenRouter response is large enough (~500KB+) to exceed bash's maximum argument size. Passing it as a shell variable or command argument triggers "Argument list too long" and the entire sync silently fails.
+
+**Why:** `start-manager-agent.sh` writes the curl output to `/tmp/openrouter-models.json` and passes it to jq using `--slurpfile or_data /tmp/openrouter-models.json`. jq reads the file directly; the shell never holds the content in an argument.
+
+**Do not change because:** Reverting to a shell variable causes silent sync failure for all models. After the sync, the updated config is also pushed back to MinIO (`mc cp`) so the background MinIO→Local sync that runs seconds later does not overwrite the fresh values.
+
+---
+
+### OpenRouter sync also pushes updated config to MinIO immediately
+
+**Looks like:** The startup sequence updates `openclaw.json` locally, then MinIO sync runs later in the background and everything is consistent.
+
+**Actually:** The k8s startup block runs `mc mirror hiclaw/hiclaw-storage/manager/ /root/manager-workspace/ --overwrite` a few seconds into startup. If the OpenRouter sync updates `openclaw.json` but doesn't push to MinIO, the subsequent background sync pulls the OLD config from MinIO and overwrites the fresh values.
+
+**Why:** After the OpenRouter sync and the `del(.pricing)` cleanup pass, `start-manager-agent.sh` immediately runs `mc cp /root/manager-workspace/openclaw.json hiclaw/hiclaw-storage/manager/openclaw.json` so MinIO and local are in sync before the background pull can fire.
+
+**Do not change because:** Removing the immediate MinIO push means the background sync undoes the model metadata updates on every restart.
+
+---
+
+### openclaw schema rejects unknown model fields — del(.pricing) is required
+
+**Looks like:** Extra fields in the models array are harmless — the gateway just ignores them.
+
+**Actually:** OpenClaw validates each model object against a strict JSON schema. The `pricing` field (added by the OpenRouter sync in an earlier buggy version and preserved in MinIO) causes the gateway to reject the entire config with a schema validation error on startup, falling back to defaults and losing all customizations.
+
+**Why:** `start-manager-agent.sh` runs a `del(.pricing)` jq pass over every model in the `hiclaw-gateway` provider list on every startup, before any other config updates. This is defensive: even if a future version of the sync accidentally reintroduces `pricing`, the cleanup pass removes it.
+
+**Do not change because:** Removing the cleanup pass allows poisoned MinIO configs to crash the gateway on next startup.
+
+---
+
+### auto-login.js injects session directly, bypassing the SSO token flow
+
+**Looks like:** The natural way to auto-log into Element after Google OAuth is to use Element's `loginToken` URL parameter (the standard Matrix SSO redirect).
+
+**Actually:** The `loginToken` flow triggers a full fresh login, which always presents the "verify this device" cross-signing screen. This cannot be suppressed in Element 1.12.x without rebuilding the app.
+
+**Why:** `start-element-web.sh` generates `auto-login.js` which calls `POST /hiclaw-api/session` — a hiclaw-controller API endpoint that returns a pre-existing access token, user ID, and device ID. The script writes these directly into `localStorage` under the `mx_*` keys that Element reads on page load. Element then enters "restore session" mode (not "new login" mode) and skips the cross-signing screen entirely.
+
+**Consequence:** The user must have an existing Matrix session established at least once. On a fresh install, the first login must be done manually via the SSO flow; subsequent logins use the injected session.
+
+**Do not change because:** Using the `loginToken` redirect causes the cross-signing screen to appear on every login, requiring the user to click through a multi-step verification flow. The direct session injection bypasses this completely.
 
 ---
 
@@ -487,7 +563,7 @@ docker logs hiclaw-manager --since 10m 2>&1 | grep '\[reload\]'
 
 **Fix:** Changed `\|` to `|` in `novnc-startup.sh` (watchdog pkill). Added pgrep guard in Chrome wrapper — only delete Singleton files when Chrome is NOT already running.
 
-**Rule:** The Chrome wrapper's pgrep guard must not be removed. The unescaped `|` in pkill must not be re-escaped. See Idiosyncratic Decisions #2 and #4.
+**Rule:** The Chrome wrapper's pgrep guard must not be removed. The unescaped `|` in pkill must not be re-escaped. See Idiosyncratic Decisions #4 and #5.
 
 **Recovery:** `docker exec novnc-... pkill -f "/opt/google/chrome/chrome"` — kills all Chrome, watchdog restarts one clean instance within ~5 seconds.
 
@@ -536,7 +612,7 @@ docker start hiclaw-controller && sleep 15 && docker start hiclaw-manager
 
 ---
 
-### Incident 3 — clawtalk plugin lost on container restart (ongoing)
+### Incident 5 — clawtalk plugin lost on container restart (resolved 2026-05-08)
 
 **What happened:** The clawtalk npm plugin (for ClawTalk integration) loads correctly in the OpenClaw CLI but not in the running gateway. A CJS wrapper was created inside the hiclaw-manager container to fix the ESM/CJS incompatibility, but it lives on the container's overlay filesystem and is wiped on every container restart.
 
@@ -561,9 +637,89 @@ docker exec hiclaw-manager bash -c 'jq ".commands.restart = true" /root/manager-
 
 ---
 
+### Incident 6 — Swap exhausted by stale Claude Code session; npm OOM crash loop (2026-05-30)
+
+**What happened:** A Claude Code session from 9 days earlier left a bash process (PID 527449) consuming 828 MB of swap. When npm install was run to update openclaw, the combined swap demand caused OOM kills. The partial install left openclaw missing its `json5` dependency, causing a persistent gateway crash loop. Container had to be recreated from the base image (`higress/hiclaw-manager:v1.1.0`).
+
+**Root cause:** Stale long-running shell processes from abandoned AI coding sessions accumulate in swap. On a memory-constrained server (4 GB swap, ~400–600 MB free RAM), any large npm install risks OOM if swap is already occupied by leaking background processes.
+
+**Recovery steps taken:**
+1. Identified the stale process: `sudo cat /proc/527449/cmdline` showed it was a bash login shell from 9 days ago
+2. Killed it: `kill 527449` — freed 828 MB swap immediately
+3. Container was already broken (missing json5); recreated from base image
+4. `start-manager-agent.sh` re-ran all bootstraps correctly on fresh container
+5. openclaw update was applied via "Update now" UI button (not direct npm install)
+
+**Rule:** Do NOT run `npm install -g openclaw@latest` directly inside the container. Use the "Update now" button in the OpenClaw Control UI. The keeper detects the hash change and triggers a clean container restart. Direct npm install bypasses the keeper mechanism and risks OOM on memory-constrained servers.
+
+**If swap appears exhausted:** Check for stale long-running processes before any large memory operation:
+```bash
+# Find processes using swap
+for pid in /proc/[0-9]*/status; do
+    awk '/^Pid:|^VmSwap:/{printf "%s ", $2}' "$pid"
+    echo
+done 2>/dev/null | awk '$2 > 10000 {print}' | sort -k2 -rn | head -20
+# Kill confirmed-stale processes, then retry
+```
+
+---
+
+### Incident 7 — openclaw hash detection broken: container overlay vs. workspace volume (2026-05-30)
+
+**What happened:** The "Update now" button ran `openclaw update` inside the container (updating the npm-installed version), but the keeper never detected the change and never triggered a container restart. The new openclaw version was silently ignored; the gateway kept running with old module files.
+
+**Root cause:** `start-manager-agent.sh` was writing the startup hash to `${HOME}/.openclaw-startup-pkg-hash` (i.e., `/root/.openclaw-startup-pkg-hash` inside the container). This path is on the container's overlay filesystem — it is invisible to the host. The keeper read from `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash` (the host-side path), which never had data, so `startup_pkg_hash` was always empty and the comparison always skipped.
+
+**Fix:** The startup script now writes to `/root/manager-workspace/.openclaw-startup-pkg-hash`. The `/root/manager-workspace/` directory is bind-mounted from `/worksp/hiclaw/workspace/` on the host, so the file is immediately visible to the keeper at `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`.
+
+**Additionally fixed:** Both the startup script and the keeper now probe for the openclaw package.json at the npm global install path first (`/usr/lib/node_modules/openclaw/package.json`), falling back to the image built-in (`/opt/openclaw/package.json`). This handles both updated containers (npm path exists) and fresh-from-image containers (only the opt path exists).
+
+**Rule:** The startup hash file must be written to a bind-mounted path visible to the host. Never write state that the keeper needs to `/root/` or `${HOME}/` — those paths are on the container overlay.
+
+---
+
+### Incident 8 — control.claw 502 Bad Gateway after manager container recreation (2026-05-30)
+
+**What happened:** After `docker restart hiclaw-manager`, the control.claw web UI returned 502 Bad Gateway for all API calls. The nginx inside hiclaw-controller was proxying to hiclaw-manager via a hardcoded container IP that Docker had reassigned to a different container after recreation.
+
+**Root cause:** The `manager-console.conf` nginx config used `proxy_pass http://<static-IP>:8080`. Docker's IPAM reassigns IPs when containers are removed and recreated (not just restarted). A `docker rm + docker run` cycle gives the new container a different IP from the DHCP pool.
+
+**Fix:** `start-element-web.sh` now generates `manager-console.conf` with:
+```nginx
+resolver 127.0.0.11 valid=10s;
+set $upstream hiclaw-manager;
+proxy_pass http://$upstream:8080;
+```
+Docker's embedded DNS resolver (`127.0.0.11`) resolves `hiclaw-manager` by container name. Storing the hostname in a variable forces nginx to re-resolve on each request rather than caching the IP at startup. Valid for 10 seconds means stale entries expire quickly after a restart.
+
+**Rule:** Never hardcode container IPs in nginx proxy configs. Always use Docker DNS (`resolver 127.0.0.11`) with a hostname variable.
+
+---
+
+### Incident 9 — OpenRouter sync poisoned config with 'pricing' field (2026-05-30)
+
+**What happened:** An early version of the OpenRouter model sync wrote the full OpenRouter model object (including `pricing`) into the `hiclaw-gateway` models list. OpenClaw's strict JSON schema validation rejected the config on startup, causing the gateway to fall back to defaults and lose all customizations (Matrix token, model list, plugins).
+
+**Root cause:** The jq sync expression passed `.` (the entire OpenRouter model object) into the openclaw model entry instead of extracting only the fields openclaw understands (`contextWindow`, `maxTokens`). The `pricing` field is present in every OpenRouter model object.
+
+**Two-part fix:**
+1. The jq sync expression was corrected to only set `contextWindow` and `maxTokens`, never copy the full OpenRouter object
+2. A defensive `del(.pricing)` cleanup pass runs on every startup regardless, before the gateway starts — this prevents any previously-poisoned MinIO config from causing failures
+
+**Additionally:** The immediate MinIO push after sync was added to prevent the background MinIO→Local sync from overwriting the cleaned config with the old poisoned version.
+
+**Rule:** When syncing external model data into openclaw config, always extract specific fields. Never spread external objects directly into openclaw's model schema.
+
+---
+
 ## 15. Pending Work
 
 - [x] **Clawtalk loads automatically on container start** — `bootstrap_clawtalk_plugin()` in `start-manager-agent.sh` creates the bundled shim and deletes `installs.json` so the gateway does a fresh plugin scan and discovers clawtalk. All critical checks pass (`bot_connected ✓`).
+- [x] **openclaw update detection fixed** — hash is now written to workspace volume (bind-mounted), visible to host-side keeper. Both startup script and keeper probe npm path first, fall back to image built-in.
+- [x] **control.claw 502 after manager restart fixed** — nginx now uses Docker DNS resolver with hostname variable instead of hardcoded IP.
+- [x] **openclaw symlink fixed after npm update** — startup script runs `ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw` if npm-installed version exists.
+- [x] **OpenRouter model metadata sync** — deepseek/deepseek-v4-pro now shows 1048576 context window from OpenRouter live data. Sync runs on every startup.
+- [ ] **Other models still use hardcoded context windows** — gpt-5.4, claude-opus-4-6, deepseek-chat, kimi-k2.5, etc. use Higress gateway alias IDs that have no OpenRouter equivalent. Their context windows cannot be auto-synced without a mapping table or by changing the model IDs to match OpenRouter's canonical IDs.
 - [ ] **Rebuild `ghcr.io/u2giants/novnc-desktop` image** — Chrome wrapper fix (pgrep guard) is applied to the running container in-place but the Dockerfile fix has not been built and pushed yet. Next push to `novnc-desktop/` will trigger this automatically.
 - [ ] **Mount clawtalk modifications from host** — instead of recreating them inside the container, mount the fixed files from `/worksp/hiclaw/workspace/` so they survive container restarts permanently.
 - [ ] **Move hiclaw-manager and hiclaw-controller to Coolify** — currently managed by keeper scripts. Low priority; scripts work reliably.

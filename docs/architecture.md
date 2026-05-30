@@ -8,22 +8,38 @@ This repo is a host-ops wrapper around a running HiClaw deployment. It does not 
 
 ### hiclaw-controller
 
-- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-embedded:v1.1.0`
-- Runs: MinIO (port 9000/9001), Higress console, Envoy, kube-apiserver, Tuwunel Matrix homeserver (port 6167), Element Web (nginx port 8088), manager-console proxy (port 18888)
+- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-embedded:v1.1.0` (Alibaba/Higress, not owned by this repo)
+- Runs (via supervisord):
+  - `kube-apiserver` and `etcd` — embedded Kubernetes control plane
+  - `hiclaw-controller` binary — ManagerReconciler, MinIO sync push, config template reconciliation
+  - MinIO (ports 9000/9001) — object storage for workspace sync
+  - Higress (Envoy-based AI gateway) and `higress-console` (Java)
+  - Tuwunel — Matrix homeserver (port 6167)
+  - nginx — serves Element Web (port 8088), manager-console proxy (port 18888), WASM plugin server (port 8002)
 - Volume: `/var/lib/docker/volumes/hiclaw-data/_data` → `/data` (MinIO lives at `/data/minio/`)
 - Bind mounts:
   - `/worksp/hiclaw/workspace` → `/root/hiclaw-fs/agents/manager`
   - `/var/run/docker.sock` → `/var/run/docker.sock`
+- Networks: `hiclaw-net`, `coolify` (Traefik access)
+- Traefik routes:
+  - `control.claw.designflow.app` → hiclaw-controller:18888 (manager console, via oauth2-proxy)
+  - `claw.designflow.app` → hiclaw-controller:8088 (Element Web, via oauth2-proxy)
 
 ### hiclaw-manager
 
-- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager:v1.1.0`
+- Image: `higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager:v1.1.0` (Alibaba/Higress, not owned by this repo)
 - Runs: OpenClaw gateway (Node.js), agent process
 - `HICLAW_RUNTIME=k8s` — confirmed active; this affects startup sync behavior (see below)
 - `HICLAW_MANAGER_RUNTIME=openclaw`
+- OpenClaw binary locations:
+  - Base image: `/opt/openclaw/` (version 2026.4.14, built into image)
+  - After "Update now": `/usr/lib/node_modules/openclaw/` (npm global install)
+  - Active symlink: `/usr/local/bin/openclaw` — patched by startup script to prefer the npm-installed version if present, otherwise falls back to `/opt/openclaw/`
 - Bind mounts:
   - `/worksp/hiclaw/workspace` → `/root/manager-workspace`
   - `/home/ai` → `/host-share`
+- Networks: `hiclaw-net`, `coolify`
+- Traefik route: `gateway.claw.designflow.app` → hiclaw-manager:18799 (OpenClaw gateway, via oauth2-proxy)
 
 ### novnc-desktop
 
@@ -47,7 +63,7 @@ Both containers share the same host directory via different bind-mount paths:
 
 ```
 Host: /worksp/hiclaw/workspace/
-  └── mounted as /root/manager-workspace/    in hiclaw-manager
+  └── mounted as /root/manager-workspace/           in hiclaw-manager
   └── mounted as /root/hiclaw-fs/agents/manager/   in hiclaw-controller
 ```
 
@@ -57,7 +73,7 @@ This means edits to the workspace by either container are immediately visible to
 
 ### Manager startup (HICLAW_RUNTIME=k8s)
 
-`HICLAW_RUNTIME=k8s` is the active mode. The k8s startup block in `start-manager-agent.sh` (lines 171-196) runs on **every container start**:
+`HICLAW_RUNTIME=k8s` is the active mode. The k8s startup block in `start-manager-agent.sh` runs on **every container start**:
 
 1. Configures `mc` alias pointing to the controller's MinIO (`http://hiclaw-controller:9000`)
 2. Pulls MinIO `hiclaw/hiclaw-storage/manager/` → `/root/manager-workspace/` (the workspace)
@@ -67,6 +83,9 @@ This means edits to the workspace by either container are immediately visible to
 Step 2 is the most dangerous step — see [MinIO sync safety](#minio-sync-safety).
 
 After the pull, the manager:
+- Fetches OpenRouter `/v1/models` and updates `openclaw.json` `contextWindow`/`maxTokens` for any model whose ID exactly matches an OpenRouter model ID. Pushes the updated config back to MinIO immediately so the background MinIO→local sync does not overwrite it.
+- Patches `/usr/local/bin/openclaw` symlink to prefer `/usr/lib/node_modules/openclaw/` (npm-installed) if present, otherwise `/opt/openclaw/`
+- Writes the current openclaw package hash to `/root/manager-workspace/.openclaw-startup-pkg-hash` (host-visible via bind mount at `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`)
 - Bootstraps ClawTalk (creates bundled shim, clears `installs.json`)
 - Patches `openclaw.json` (sets `commands.restart = true` for initial gateway reload)
 - Starts the OpenClaw gateway
@@ -84,6 +103,14 @@ The controller's internal ManagerReconciler (proprietary code) pushes workspace 
 3. `manager-config-keeper.sh` (runs every minute via cron) detects the drift, migrates `allow → enabled`, normalizes `commands: {}`, and syncs `config-health.json` so observe-recovery does not revert the fix.
 4. The gateway applies a hot reload (no restart, no dropped connections).
 
+### OpenClaw update mechanism
+
+1. Admin clicks "Update now" in the Control UI.
+2. OpenClaw runs `openclaw update` in-process, which executes `npm install -g openclaw@latest` and installs the new version to `/usr/lib/node_modules/openclaw/`.
+3. `manager-bootstrap-keeper.sh` (runs on the host) detects a hash mismatch between `/usr/lib/node_modules/openclaw/package.json` (or `/opt/openclaw/package.json` if npm path absent) and `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`.
+4. The keeper recreates the hiclaw-manager container.
+5. On restart, `start-manager-agent.sh` patches the `/usr/local/bin/openclaw` symlink to the npm-installed version and records the new hash.
+
 ### Controller Element Web startup
 
 1. `hiclaw-controller` runs `start-element-web.sh` (host-owned, injected by `controller-bootstrap-keeper.sh`) as the supervisord Element Web component.
@@ -96,13 +123,13 @@ The controller's internal ManagerReconciler (proprietary code) pushes workspace 
    - `new-chat-btn.js` — injects the + New Chat button
    - `hiclaw-chat-api.py` — Python HTTP helper on `127.0.0.1:8091`
 3. It clears any stale nginx master (prevents crash-loop on ports `8088`/`18888`/`8002`), starts `hiclaw-chat-api.py`, then starts nginx in the foreground.
-4. nginx injects all `.js` files above via `sub_filter` into every HTML response, and proxies:
+4. nginx injects all `.js` files above via `sub_filter` into every HTML response. The manager-console proxy uses `resolver 127.0.0.11 valid=10s; set $upstream hiclaw-manager;` (Docker DNS) rather than a hardcoded IP, so it survives container recreation without stale IP errors. nginx proxies:
    - `/hiclaw-api/session` → Python helper `/session` (Matrix session credentials for auto-login)
    - `/hiclaw-api/new-chat` → Python helper `/new-chat`
    - `/hiclaw-api/matrix-auth` → Python helper `/matrix-auth` (legacy login-token flow, unused by auto-login)
    - `/hiclaw-api/healthz` → Python helper `/healthz`
    - Element Web itself on port 8088
-   - Manager console (auto-token-injected) on port 18888
+   - Manager console (hiclaw-manager:18799, auto-token-injected) on port 18888
    - WASM plugins on port 8002
 
 ### New Chat workflow
@@ -205,7 +232,7 @@ Recursive (broken) state:
 
 ### The guard
 
-`start-manager-agent.sh` (lines 186-193) adds `--exclude` flags to the k8s startup pull:
+`start-manager-agent.sh` adds `--exclude` flags to the k8s startup pull:
 
 ```bash
 mc mirror "${HICLAW_STORAGE_PREFIX}/manager/" /root/manager-workspace/ --overwrite \
@@ -278,3 +305,6 @@ These files are pushed to MinIO as `manager/openclaw.json.clobbered.*` and accum
 - **`fix-element-config.sh` installs ephemeral patches inside containers.** The npm wrapper, mc wrapper, and some nginx config written by this script live only until the next container recreation. The persistent versions are delivered by `start-element-web.sh` (controller) and `start-manager-agent.sh` (manager) via the bootstrap keepers.
 - **`session.dmScope = "main"` is forced.** Multiple DMs with the same manager bot would create isolated per-channel sessions that never share context. The single-admin model intentionally avoids that by routing everything through `agent:main:main`.
 - **nginx stale master cleanup in `start-element-web.sh`.** The controller can retain an old daemonized nginx master across patching cycles. A second nginx instance causes Element Web to crash-loop on port conflicts. The cleanup runs on every controller startup to prevent this.
+- **nginx manager-console proxy uses Docker DNS resolver, not a hardcoded IP.** Docker reassigns container IPs on recreation. Using `resolver 127.0.0.11 valid=10s; set $upstream hiclaw-manager;` ensures nginx re-resolves on each request rather than caching a stale IP.
+- **OpenRouter model sync writes to a file, not a shell variable.** The API response for all models is large enough to exceed shell argument length limits ("Argument list too long"). The startup script writes the response to a temp file and reads from it with `jq`.
+- **OpenRouter sync pushes config back to MinIO immediately.** The background MinIO→local sync starts seconds after startup. Without the push, the background sync would pull the old config from MinIO and overwrite the freshly-updated `openclaw.json`.

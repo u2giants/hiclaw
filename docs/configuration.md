@@ -14,16 +14,35 @@ This file has three concurrent writers: the controller reconciler, the OpenClaw 
 
 | Script | Purpose | Persistent how |
 |---|---|---|
-| `start-manager-agent.sh` | Manager startup; ClawTalk bootstrap; k8s MinIO sync | Copied into container by `manager-bootstrap-keeper.sh` |
+| `start-manager-agent.sh` | Manager startup; ClawTalk bootstrap; k8s MinIO sync; OpenRouter model sync | Copied into container by `manager-bootstrap-keeper.sh` |
 | `start-element-web.sh` | Controller Element Web startup; nginx config; New Chat API | Copied into controller by `controller-bootstrap-keeper.sh` |
 | `manager-config-keeper.sh` | Stabilizes `openclaw.json`; runs from host directly | Host cron, every minute |
-| `manager-bootstrap-keeper.sh` | Re-applies startup script after container recreation | Host cron, every minute |
+| `manager-bootstrap-keeper.sh` | Re-applies startup script after container recreation; restarts container on openclaw package update | Host cron, every minute |
 | `controller-bootstrap-keeper.sh` | Re-applies controller startup script after recreation | Host cron, every minute |
 | `mcp-keeper.sh` | Re-adds browser MCP block to `openclaw.json` | **Not in cron** — run manually when needed |
 
 ### Keeper state
 
 `.state/manager-bootstrap-keeper.last-container` and `.state/controller-bootstrap-keeper.last-container` record the last container ID that received the patched script, so keepers skip containers they have already patched.
+
+The bootstrap keeper also tracks the openclaw package hash at `workspace/.openclaw-startup-pkg-hash` (bind-mounted from `/root/manager-workspace/.openclaw-startup-pkg-hash` inside the container). When the hash changes — which happens after a successful `openclaw update` — the keeper restarts the container so new module files load correctly. The keeper does **not** restart the container when only the startup script changes (script changes take effect at next natural container start).
+
+---
+
+## openclaw Install Paths
+
+openclaw may be installed at two locations depending on whether it has been updated since the base image:
+
+| Path | When present |
+|---|---|
+| `/opt/openclaw/` | Always present — bundled in the base image (`higress/hiclaw-manager:v1.1.0`) |
+| `/usr/lib/node_modules/openclaw/` | Present after `openclaw update` runs (npm global install) |
+
+The startup script checks the npm path first. If `/usr/lib/node_modules/openclaw/package.json` exists, it symlinks `/usr/local/bin/openclaw` to `/usr/lib/node_modules/openclaw/openclaw.mjs` so the newer version is used. Otherwise the base-image binary at `/opt/openclaw/` is used.
+
+The package hash for update detection is read from the npm path if present, otherwise from `/opt/openclaw/package.json`.
+
+Updates are triggered via the "Update now" button in the Control UI, which runs `openclaw update` in-process. Do not run `npm install -g openclaw@latest` directly — it runs without adequate swap margin and can OOM-kill the container, leaving a broken partial install.
 
 ---
 
@@ -55,10 +74,10 @@ The controller's ManagerReconciler writes its template to `openclaw.json` every 
 
 | Value keeper writes | Diff vs startup baseline | Result |
 |---|---|---|
-| `{"restart": true}` | No change in `commands` | ✅ Hot reload only |
-| `{}` | `commands.restart` removed (true → absent) | ❌ Full restart |
-| `null` | `commands` changed (object → null) | ❌ Full restart |
-| `{"restart": false}` | `commands.restart` changed (true → false) | ❌ Full restart |
+| `{"restart": true}` | No change in `commands` | Hot reload only |
+| `{}` | `commands.restart` removed (true → absent) | Full restart |
+| `null` | `commands` changed (object → null) | Full restart |
+| `{"restart": false}` | `commands.restart` changed (true → false) | Full restart |
 
 #### Inspect the baseline yourself
 
@@ -163,6 +182,18 @@ CDP endpoint `10.0.5.4:9223` is the static IP of the `novnc-desktop` container o
 
 Set to `20000` by the keeper so AGENTS.md (15k+ chars) is not truncated when the manager loads its bootstrap context.
 
+### Model metadata (`models` / `known-models.json`)
+
+On startup, `start-manager-agent.sh` fetches live model metadata from the OpenRouter API and merges it into `openclaw.json`. For any model whose ID matches an OpenRouter model ID, the startup script overwrites `contextWindow` and `maxTokens` with the live values from OpenRouter.
+
+Currently only `deepseek/deepseek-v4-pro` matches an OpenRouter model ID — it is updated to 1048576 context. Other models used in this deployment (`gpt-5.4`, `claude-opus-4-6`, `deepseek-chat`, etc.) are accessed through Higress gateway alias IDs that have no OpenRouter equivalent, so their context windows remain at the static values in `known-models.json`.
+
+The OpenRouter response is written to a temp file (not a shell variable) to avoid "Argument list too long" errors with large JSON payloads.
+
+After the OpenRouter sync, the startup script immediately pushes the updated config back to MinIO so the background `MinIO→Local` sync (which starts seconds later) does not overwrite the freshly-synced values with stale MinIO data.
+
+The OpenClaw schema rejects unknown model fields. The startup script strips the `pricing` field (returned by OpenRouter) before writing to `openclaw.json`.
+
 ---
 
 ## MinIO Storage Configuration
@@ -244,7 +275,7 @@ Variables used by this host-ops layer. The complete upstream HiClaw variable set
 
 | Variable | Used by | Description |
 |---|---|---|
-| `HICLAW_LLM_API_KEY` | startup | OpenRouter API key |
+| `HICLAW_LLM_API_KEY` | startup | OpenRouter API key (also used for OpenRouter model metadata sync) |
 | `HICLAW_LLM_PROVIDER` | startup | LLM provider (`openai-compat`) |
 | `HICLAW_DEFAULT_MODEL` | startup | Default model (`deepseek/deepseek-v4-pro`) |
 
@@ -263,6 +294,20 @@ The Google Cloud Console OAuth app must have `https://control.claw.designflow.ap
 To rotate credentials: update `oauth2-proxy/.env`, then `cd oauth2-proxy && docker compose up -d`.
 
 To extract the current cookie secret: `docker inspect oauth2-proxy | grep cookie-secret`.
+
+---
+
+## nginx Upstream Resolution
+
+nginx inside `hiclaw-controller` proxies the Control UI to `hiclaw-manager`. It uses Docker's internal DNS resolver (`127.0.0.11`) with a short TTL rather than a hardcoded IP:
+
+```nginx
+resolver 127.0.0.11 valid=10s;
+set $upstream hiclaw-manager;
+proxy_pass http://$upstream:3000;
+```
+
+This is generated by `start-element-web.sh` into `manager-console.conf`. The dynamic `$upstream` variable forces nginx to re-resolve on each request, which prevents 502 errors after `hiclaw-manager` is recreated (Docker assigns a new IP on recreation). **Do not replace this with a hardcoded IP.**
 
 ---
 
@@ -290,6 +335,7 @@ Current host crontab (verify with `crontab -l`):
 | `workspace/.openclaw/logs/config-health.json` | OpenClaw config health baseline — kept in sync by the config keeper |
 | `workspace/.openclaw/openclaw.json.bak` | OpenClaw backup — kept in sync by the config keeper to prevent observe-recovery rollbacks |
 | `workspace/.openclaw/clawtalk/ws.log` | ClawTalk WebSocket service log |
+| `workspace/.openclaw-startup-pkg-hash` | openclaw package hash written by startup script; read by bootstrap keeper to detect updates |
 
 ---
 
@@ -298,3 +344,4 @@ Current host crontab (verify with `crontab -l`):
 - **ClawTalk API key is hardcoded in `manager-config-keeper.sh`.** It belongs in an env var or secret store. Current design accepts this for a single-deployment host-ops layer.
 - **`fix-element-config.sh` hardcodes the manager gateway key** in the nginx `manager-console.conf` sub_filter template for auto-login token injection. This key is already in the manager container's environment — the hardcoded value is a convenience for the one-off repair script.
 - **`workspace/.openclaw/npm/node_modules/@openclaw/whatsapp` path** is hardcoded in `manager-config-keeper.sh`. It is the npm install path inside the manager container and does not vary across instances.
+- **OpenRouter model sync is partial.** Only models with IDs that match OpenRouter's catalog get live context window values. Gateway alias IDs (e.g. `gpt-5.4`, `claude-opus-4-6`) have no OpenRouter equivalent and keep static values from `known-models.json`. A mapping table would be needed to fix this.

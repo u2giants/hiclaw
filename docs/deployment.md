@@ -89,12 +89,47 @@ When HiClaw recreates `hiclaw-manager` or `hiclaw-controller`, the keeper cron j
 
 1. HiClaw recreates the container with the stock startup script.
 2. The keeper detects the script hash mismatch.
-3. The keeper copies the host-owned patched script into the container and restarts it once.
-4. The patched startup runs: MinIO sync pulls (with exclusions), ClawTalk bootstrap, gateway starts.
+3. The keeper copies the host-owned patched script into the container **without restarting the container**. The patch takes effect on the next natural restart.
+4. If the keeper also detects that the openclaw package hash changed since startup, it triggers `docker restart` so the new binary loads.
+5. On restart, the patched startup runs: MinIO sync pulls (with exclusions), ClawTalk bootstrap, gateway starts.
 
 During the restart window the keeper may log `container startup script not readable yet; skipping this run` — this is expected while the container is still booting.
 
 **Always run the MinIO recursion check after any restart.** See the check commands above.
+
+### What the keeper does and does not restart for
+
+| Change | Restart triggered |
+|---|---|
+| `start-manager-agent.sh` content changed | No — patched silently; takes effect on next natural restart |
+| openclaw package hash changed (after "Update now") | Yes — `docker restart hiclaw-manager` |
+| Container was recreated (new container ID) | Resource limits re-applied; no extra restart |
+
+This means `git push` of a script change does not log out the active user.
+
+## openclaw Updates
+
+openclaw updates must go through the Control UI "Update now" button, not `npm install -g` directly.
+
+**Do NOT run `npm install -g openclaw` manually.** If swap is low (check: `free -h`), a direct npm install can OOM-kill the container mid-install, leaving a broken partial install with missing dependencies (e.g. `json5`). Recovery requires container recreation from the base image.
+
+The safe update path:
+1. Open the OpenClaw Control UI (https://gateway.claw.designflow.app)
+2. Click "Update now"
+3. openclaw installs itself via the manager's controlled mechanism
+4. The bootstrap keeper detects the package hash change within 60 seconds
+5. The keeper runs `docker restart hiclaw-manager`
+6. On restart, `start-manager-agent.sh` updates `/usr/local/bin/openclaw` to point to the npm-installed binary and records the new package hash
+
+After restart, verify: `docker exec hiclaw-manager openclaw --version`
+
+### openclaw symlink behavior
+
+The base image ships openclaw at `/opt/openclaw/`. After an npm-based update, openclaw installs to `/usr/lib/node_modules/openclaw/`. The startup script updates `/usr/local/bin/openclaw` to point to the npm version when it exists. Without this step, `openclaw gateway run` would execute the stale image-built-in binary.
+
+### openclaw hash detection
+
+The startup script writes a sha256 of the active `package.json` to `/root/manager-workspace/.openclaw-startup-pkg-hash` (which is bind-mounted to the host at `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`). The keeper reads this file and compares it against the current in-container package hash to detect updates. Both the startup script and the keeper probe `/usr/lib/node_modules/openclaw/package.json` first, falling back to `/opt/openclaw/package.json` for fresh containers.
 
 ## HiClaw Upgrade Workflow
 
@@ -129,6 +164,32 @@ crontab -l
 
 These container-internal patches are ephemeral (lost on next recreation). The persistent versions come from `start-manager-agent.sh` and `start-element-web.sh`.
 
+## Model Context Window Sync (OpenRouter)
+
+On each manager startup, `start-manager-agent.sh` fetches the live model list from OpenRouter and updates `contextWindow` and `maxTokens` for any model whose ID matches an OpenRouter model ID. This keeps context windows accurate for models like `deepseek/deepseek-v4-pro` (1M tokens) without manual edits.
+
+Models accessed via Higress gateway alias IDs (e.g. `deepseek-chat`, `gpt-5.4`, `claude-opus-4-6`) do not match any OpenRouter ID and are left at their statically configured values. Only models whose IDs are OpenRouter-native (e.g. `deepseek/deepseek-v4-pro`) get live values.
+
+The sync writes the updated config back to MinIO immediately after running, so the background MinIO→Local sync cannot overwrite the updated values.
+
+## nginx Upstream Resolution (control.claw → manager)
+
+nginx inside `hiclaw-controller` proxies requests to `hiclaw-manager`. It must not use a hardcoded IP — Docker reassigns container IPs on recreation.
+
+`start-element-web.sh` generates `manager-console.conf` using Docker's internal DNS resolver:
+
+```nginx
+resolver 127.0.0.11 valid=10s;
+set $upstream hiclaw-manager;
+proxy_pass http://$upstream:18799;
+```
+
+This means nginx re-resolves `hiclaw-manager` via Docker DNS on each request rather than caching a stale IP. If `control.claw.designflow.app` returns 502 after a manager restart, verify this config is in place:
+
+```bash
+docker exec hiclaw-controller cat /etc/nginx/conf.d/manager-console.conf
+```
+
 ## novnc-desktop Image Update
 
 Changes to `novnc-desktop/` trigger a GitHub Actions build automatically on push to `main`. To apply the new image:
@@ -149,7 +210,7 @@ cd /worksp/hiclaw && git pull
 
 # Then restart affected service:
 # keeper scripts: cron picks up automatically
-# start-manager-agent.sh: bash manager-bootstrap-keeper.sh (detects hash change, restarts manager)
+# start-manager-agent.sh: bash manager-bootstrap-keeper.sh (patches silently; restart only on next natural restart)
 # start-element-web.sh: bash controller-bootstrap-keeper.sh (detects hash change, restarts controller)
 # oauth2-proxy: cd oauth2-proxy && docker compose up -d
 # traefik: docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml

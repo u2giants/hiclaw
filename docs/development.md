@@ -20,10 +20,10 @@ This repo is shell scripts, a single Dockerfile, and deployment state. There is 
 
 | File | What it controls |
 |---|---|
-| `start-manager-agent.sh` | Manager startup, ClawTalk bootstrap, MinIO sync, openclaw.json initialization |
+| `start-manager-agent.sh` | Manager startup, ClawTalk bootstrap, MinIO sync, openclaw.json initialization, OpenRouter model sync |
 | `start-element-web.sh` | Controller Element Web, nginx, New Chat API, manager console proxy |
 | `manager-config-keeper.sh` | `openclaw.json` stabilization (runs every minute via cron) |
-| `manager-bootstrap-keeper.sh` | Keeps startup script current in the manager container |
+| `manager-bootstrap-keeper.sh` | Keeps startup script current in the manager container; restarts only on openclaw package updates |
 | `controller-bootstrap-keeper.sh` | Keeps startup script current in the controller container |
 | `mcp-keeper.sh` | Re-adds browser MCP block (run manually) |
 | `novnc-desktop/novnc-startup.sh` | Chrome watchdog, CDP proxy, browser launch flags |
@@ -36,10 +36,12 @@ This repo is shell scripts, a single Dockerfile, and deployment state. There is 
 
 ```bash
 bash -n /worksp/hiclaw/start-manager-agent.sh     # syntax check
-bash /worksp/hiclaw/manager-bootstrap-keeper.sh    # apply + restart if changed
+bash /worksp/hiclaw/manager-bootstrap-keeper.sh    # apply silently (no restart unless openclaw pkg changed)
 docker logs hiclaw-manager --since 5m | grep -E 'gateway|ClawTalk|error'
 docker exec hiclaw-manager openclaw clawtalk doctor
 ```
+
+The keeper patches the in-container startup script silently. Startup script changes only take effect at the next container start (natural or deliberate). The keeper does **not** restart the container for script-only edits — it only restarts when the openclaw package hash changes.
 
 ### Config keeper changes
 
@@ -91,6 +93,17 @@ docker cp traefik/claw.yml coolify-proxy:/traefik/dynamic/claw.yml
 docker pull ghcr.io/u2giants/novnc-desktop:latest
 docker stop novnc-desktop && docker rm novnc-desktop
 # then re-run the docker run command from docs/deployment.md
+```
+
+### openclaw.json live changes
+
+Most fields hot-reload without a container restart:
+
+```bash
+# Edit directly — gateway picks up changes within seconds
+python3 -m json.tool /worksp/hiclaw/workspace/openclaw.json >/dev/null && echo OK
+# If the gateway reports a schema error:
+docker exec hiclaw-manager openclaw doctor --fix
 ```
 
 ---
@@ -152,6 +165,61 @@ docker exec hiclaw-controller sh -lc 'ss -ltnp | grep -E ":(8088|18888|8002)\\b"
 ```
 
 Repeated `element-web exited` lines or `bind()` failures on ports 8088/18888/8002 mean the controller has a stale nginx master — run `bash /worksp/hiclaw/controller-bootstrap-keeper.sh`.
+
+### control.claw returns 502 Bad Gateway
+
+nginx in hiclaw-controller proxies to hiclaw-manager using Docker DNS (`resolver 127.0.0.11`), so the upstream hostname resolves dynamically. A 502 after manager recreation means nginx cached a stale IP before the fix, or the resolver block is missing.
+
+```bash
+# Check nginx upstream config inside controller
+docker exec hiclaw-controller cat /etc/nginx/conf.d/manager-console.conf
+# Must contain: resolver 127.0.0.11 valid=10s; set $upstream hiclaw-manager;
+# If missing, run:
+bash /worksp/hiclaw/controller-bootstrap-keeper.sh
+```
+
+### openclaw version / symlink
+
+The base image ships openclaw at `/opt/openclaw/`. After an in-product update ("Update now" button), the package installs to `/usr/lib/node_modules/openclaw/` and the startup script updates the symlink at `/usr/local/bin/openclaw`. If the symlink still points to the old path:
+
+```bash
+docker exec hiclaw-manager ls -la /usr/local/bin/openclaw
+docker exec hiclaw-manager openclaw --version
+# If version looks wrong, the symlink may not have been updated yet.
+# The keeper detects the package hash change and will restart the container.
+# Check keeper log:
+tail -20 /worksp/hiclaw/manager-bootstrap-keeper.log
+```
+
+### openclaw update hash path
+
+The startup script writes the installed openclaw package hash to `/root/manager-workspace/.openclaw-startup-pkg-hash` inside the container. This path is bind-mounted to `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash` on the host. The keeper reads the host path. If the keeper is not detecting updates:
+
+```bash
+# Verify host-side hash file exists and is recent
+ls -la /worksp/hiclaw/workspace/.openclaw-startup-pkg-hash
+cat /worksp/hiclaw/workspace/.openclaw-startup-pkg-hash
+# Compare to current openclaw package hash:
+docker exec hiclaw-manager md5sum /usr/lib/node_modules/openclaw/package.json 2>/dev/null \
+  || docker exec hiclaw-manager md5sum /opt/openclaw/package.json
+```
+
+### OpenRouter context window sync
+
+On startup, `start-manager-agent.sh` fetches live model data from OpenRouter and patches `contextWindow` and `maxTokens` for any model whose ID matches an OpenRouter model ID. This currently works for `deepseek/deepseek-v4-pro` (1M context). Models accessed via Higress gateway alias IDs (e.g., `gpt-5.4`, `claude-opus-4-6`) are not matched and retain hardcoded values.
+
+```bash
+# Check what context window the gateway sees for a model
+docker exec hiclaw-manager openclaw model list | grep deepseek
+# Verify the startup sync ran
+docker logs hiclaw-manager --since 10m | grep -i openrouter
+```
+
+If the sync produced an openclaw schema error (unknown field), check that the startup script strips the `pricing` field before writing to openclaw.json:
+
+```bash
+docker logs hiclaw-manager --since 10m | grep -iE 'pricing|schema|unknown'
+```
 
 ### Google SSO / Element Web login not working
 
@@ -248,7 +316,7 @@ tail -30 /worksp/hiclaw/controller-bootstrap-keeper.log
 
 ### Extending startup behavior
 
-Edit `start-manager-agent.sh` for manager behavior, `start-element-web.sh` for controller/Element Web behavior. The keeper scripts detect changes (via sha256sum comparison) and apply them automatically.
+Edit `start-manager-agent.sh` for manager behavior, `start-element-web.sh` for controller/Element Web behavior. The keeper scripts detect changes (via sha256sum comparison) and patch the in-container startup script silently. The new script runs at the next natural container restart.
 
 ### Adding an openclaw.json setting that must survive controller reconciliation
 
@@ -256,7 +324,11 @@ Add it to `manager-config-keeper.sh`. Make sure to also update `config-health.js
 
 ### Adding a MinIO sync exclusion
 
-Add `--exclude "<pattern>"` to the `mc mirror` call in `start-manager-agent.sh` lines 186-193. Never remove existing exclusions — they prevent the storage recursion bug.
+Add `--exclude "<pattern>"` to the `mc mirror` call in `start-manager-agent.sh`. Never remove existing exclusions — they prevent the storage recursion bug.
+
+### Adding OpenRouter model context sync
+
+The startup script matches openclaw model IDs directly against OpenRouter model IDs. To cover Higress gateway alias IDs, add a mapping table in `start-manager-agent.sh` before the sync loop. Strip any fields openclaw does not recognize (currently `pricing`) using `del()` in the jq pipeline before writing to openclaw.json.
 
 ### Avoid these patterns
 
@@ -264,3 +336,4 @@ Add `--exclude "<pattern>"` to the `mc mirror` call in `start-manager-agent.sh` 
 - Editing files under `workspace/hiclaw/hiclaw-storage/` — this path indicates the recursion bug has triggered
 - Running `mc mirror` inside the manager with the workspace as source and a MinIO manager path as destination without verifying the workspace does not contain a MinIO mirror subdirectory
 - Setting `commands.restart = false` anywhere — see AGENTS.md Idiosyncratic Decisions
+- Running `npm install -g openclaw@latest` directly in the container when swap is low — use the in-product "Update now" button instead, which runs `openclaw update` under a controlled process
