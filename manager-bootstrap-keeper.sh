@@ -68,12 +68,16 @@ fi
 # Detect openclaw in-container package updates and restart the container so
 # new hash-stamped module files are loaded fresh (in-process restarts don't
 # reload them — see Idiosyncratic Decision #5 in AGENTS.md).
-OPENCLAW_PKG="/usr/lib/node_modules/openclaw/package.json"
 STARTUP_HASH_FILE="/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash"
+# Find the active openclaw package.json — npm global install takes priority over image built-in.
+OPENCLAW_PKG="$(docker exec "${CONTAINER_NAME}" bash -c '
+    for p in /usr/lib/node_modules/openclaw/package.json /opt/openclaw/package.json; do
+        [ -f "$p" ] && echo "$p" && break
+    done' 2>/dev/null || true)"
 if [ -f "${STARTUP_HASH_FILE}" ]; then
     startup_pkg_hash="$(cat "${STARTUP_HASH_FILE}" 2>/dev/null || true)"
     current_pkg_hash="$(
-        docker exec "${CONTAINER_NAME}" sha256sum "${OPENCLAW_PKG}" 2>/dev/null \
+        [ -n "${OPENCLAW_PKG}" ] && docker exec "${CONTAINER_NAME}" sha256sum "${OPENCLAW_PKG}" 2>/dev/null \
             | cut -d' ' -f1 || true
     )"
     if [ -n "${startup_pkg_hash}" ] && [ -n "${current_pkg_hash}" ] \

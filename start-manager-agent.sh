@@ -1541,11 +1541,17 @@ else
     # Record openclaw package hash so the host-side bootstrap keeper can detect
     # in-container updates and trigger a container restart (in-process restarts
     # don't reload new hash-stamped module files — see Idiosyncratic Decision #5).
-    if [ -f /usr/lib/node_modules/openclaw/package.json ]; then
-        sha256sum /usr/lib/node_modules/openclaw/package.json \
+    # Check npm global install path first (set after openclaw update), then fall
+    # back to the image's built-in path.
+    _oc_pkg=""
+    for _p in /usr/lib/node_modules/openclaw/package.json /opt/openclaw/package.json; do
+        if [ -f "$_p" ]; then _oc_pkg="$_p"; break; fi
+    done
+    if [ -n "$_oc_pkg" ]; then
+        sha256sum "$_oc_pkg" \
             | cut -d' ' -f1 \
             > "/root/manager-workspace/.openclaw-startup-pkg-hash" 2>/dev/null || true
-        log "Recorded openclaw package hash for update detection"
+        log "Recorded openclaw package hash for update detection (${_oc_pkg})"
     fi
 
     # Launch OpenClaw
