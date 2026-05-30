@@ -758,10 +758,34 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
 
-    # Strip fields openclaw's model schema does not accept (e.g. 'pricing' added
-    # by a previous buggy sync run and preserved in MinIO).
-    jq '(.models.providers["hiclaw-gateway"].models) |= map(del(.pricing))' \
-        /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
+    # Rename gateway-alias model IDs to their canonical OpenRouter vendor/model-name
+    # format so the OpenRouter metadata sync can match and update them. Also strip
+    # fields openclaw's model schema does not accept (e.g. 'pricing').
+    jq '
+        {
+            "gpt-5.4":               "openai/gpt-5.4",
+            "gpt-5.3-codex":         "openai/gpt-5.3-codex",
+            "gpt-5-mini":            "openai/gpt-5-mini",
+            "gpt-5-nano":            "openai/gpt-5-nano",
+            "claude-opus-4-6":       "anthropic/claude-opus-4.6",
+            "claude-sonnet-4-6":     "anthropic/claude-sonnet-4.6",
+            "claude-haiku-4-5":      "anthropic/claude-haiku-4.5",
+            "qwen3.6-plus":          "qwen/qwen3.6-plus",
+            "qwen3.5-plus":          "qwen/qwen3.5-plus-20260420",
+            "deepseek-chat":         "deepseek/deepseek-chat",
+            "deepseek-reasoner":     "deepseek/deepseek-r1-0528",
+            "kimi-k2.5":             "moonshotai/kimi-k2.5",
+            "glm-5":                 "z-ai/glm-5",
+            "MiniMax-M2.7":          "minimax/minimax-m2.7",
+            "MiniMax-M2.7-highspeed":"minimax/minimax-m2.7",
+            "MiniMax-M2.5":          "minimax/minimax-m2.5"
+        } as $id_map |
+        (.models.providers["hiclaw-gateway"].models) |= (
+            map(del(.pricing)) |
+            map(($id_map[.id] // .id) as $new_id | .id = $new_id | .name = $new_id) |
+            unique_by(.id)
+        )
+    ' /root/manager-workspace/openclaw.json > /tmp/openclaw.json.tmp && \
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
 
     # Sync model metadata (contextWindow, maxTokens) from OpenRouter.
