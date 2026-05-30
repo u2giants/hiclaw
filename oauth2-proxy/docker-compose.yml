@@ -24,6 +24,8 @@ services:
       - --cookie-secure=true
       - --cookie-samesite=lax
       - --cookie-name=_oauth2_proxy_claw
+      - --cookie-csrf-per-request=true
+      - --cookie-csrf-per-request-limit=5
     dns:
       - 1.1.1.1
       - 8.8.8.8
