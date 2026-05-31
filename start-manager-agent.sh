@@ -734,13 +734,6 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
           then .channels.matrix.groups |= with_entries(.value |= (if (.allow? != null and .enabled? == null) then .enabled = .allow | del(.allow) else . end))
           else .
           end
-        # OpenClaw YOLO defaults: host exec without approval prompts (see openclaw docs tools/exec-approvals)
-        | .tools = (.tools // {})
-        | .tools.exec = ((.tools.exec // {}) + {"host":"gateway","security":"full","ask":"off"})
-        | .tools.elevated = (.tools.elevated // {})
-        | .tools.elevated.enabled = true
-        | .tools.elevated.allowFrom |= ((. // {}) | .matrix = ["*"])
-        | .agents.defaults.elevatedDefault = "full"
         | .plugins = (.plugins // {})
         | .plugins.allow = (.plugins.allow // [])
         | if (.plugins.allow | index("whatsapp")) == null then .plugins.allow += ["whatsapp"] else . end
