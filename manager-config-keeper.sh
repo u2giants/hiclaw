@@ -131,6 +131,20 @@ try:
         changed = True
         print('whatsapp plugin entry enabled')
 
+    # Enforce correct contextWindow for models whose authoritative value is known.
+    # The startup OpenRouter sync may be overwritten by the ManagerReconciler
+    # restoring an old MinIO version; the keeper enforces the correct value every run.
+    CONTEXT_OVERRIDES = {
+        'deepseek/deepseek-v4-pro': 1048576,
+        'deepseek/deepseek-v4-flash': 1048576,
+    }
+    for m in d.setdefault('models', {}).setdefault('providers', {}).setdefault('hiclaw-gateway', {}).setdefault('models', []):
+        model_id = m.get('id', '')
+        if model_id in CONTEXT_OVERRIDES and m.get('contextWindow') != CONTEXT_OVERRIDES[model_id]:
+            m['contextWindow'] = CONTEXT_OVERRIDES[model_id]
+            changed = True
+            print(f'model {model_id} contextWindow enforced to {CONTEXT_OVERRIDES[model_id]}')
+
     whatsapp_cfg = d.setdefault('channels', {}).setdefault('whatsapp', {})
     if whatsapp_cfg.get('enabled') is not True:
         whatsapp_cfg['enabled'] = True
