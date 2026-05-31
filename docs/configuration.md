@@ -27,6 +27,8 @@ This file has three concurrent writers: the controller reconciler, the OpenClaw 
 
 The bootstrap keeper also tracks the openclaw package hash at `workspace/.openclaw-startup-pkg-hash` (bind-mounted from `/root/manager-workspace/.openclaw-startup-pkg-hash` inside the container). When the hash changes — which happens after a successful `openclaw update` — the keeper restarts the container so new module files load correctly. The keeper does **not** restart the container when only the startup script changes (script changes take effect at next natural container start).
 
+The bootstrap keeper also polls for the `.openclaw-update-requested` marker at `workspace/.openclaw-update-requested`. When the marker is present, the keeper runs `docker exec hiclaw-manager openclaw update --yes --json` (with `--memory-swap 2g` to avoid npm OOM), then removes the marker. This is the only sanctioned path for triggering an openclaw package update at runtime.
+
 ---
 
 ## openclaw Install Paths
@@ -38,11 +40,13 @@ openclaw may be installed at two locations depending on whether it has been upda
 | `/opt/openclaw/` | Always present — bundled in the base image (`higress/hiclaw-manager:v1.1.0`) |
 | `/usr/lib/node_modules/openclaw/` | Present after `openclaw update` runs (npm global install) |
 
-The startup script checks the npm path first. If `/usr/lib/node_modules/openclaw/package.json` exists, it symlinks `/usr/local/bin/openclaw` to `/usr/lib/node_modules/openclaw/openclaw.mjs` so the newer version is used. Otherwise the base-image binary at `/opt/openclaw/` is used.
+The startup script checks the npm path first. If `/usr/lib/node_modules/openclaw/package.json` exists **and** the install is valid (confirmed by the presence of `json5/package.json` inside the npm install tree), it symlinks `/usr/local/bin/openclaw` to `/usr/lib/node_modules/openclaw/openclaw.mjs` so the newer version is used. If the npm install is absent or broken (e.g. partial install from a prior OOM), the startup script removes it and falls back to the base-image binary at `/opt/openclaw/`. The symlink is always reset to base-image when the npm install is not healthy.
+
+The startup script also installs a fake `/usr/local/bin/systemd-run` and exports `OPENCLAW_SYSTEMD_UNIT=openclaw-gateway` before launching the gateway. See [OPENCLAW_SYSTEMD_UNIT](#openclaw_systemd_unit) below.
 
 The package hash for update detection is read from the npm path if present, otherwise from `/opt/openclaw/package.json`.
 
-Updates are triggered via the "Update now" button in the Control UI, which runs `openclaw update` in-process. Do not run `npm install -g openclaw@latest` directly — it runs without adequate swap margin and can OOM-kill the container, leaving a broken partial install.
+Updates are triggered via the "Update now" button in the Control UI, which invokes openclaw's `update.run` path. This writes a `.openclaw-update-requested` marker file (see [Logs and State Files](#logs-and-state-files)), which `manager-bootstrap-keeper.sh` detects and converts into a `docker exec openclaw update --yes --json` call with adequate swap headroom. Do not run `npm install -g openclaw@latest` directly inside the container — the container memory limits allow only 768 MB RAM, and without the 2 GB swap configured for the keeper's exec, npm install will OOM-kill mid-install and leave a broken partial install.
 
 ---
 
@@ -245,6 +249,7 @@ Variables used by this host-ops layer. The complete upstream HiClaw variable set
 |---|---|---|
 | `HICLAW_RUNTIME` | `k8s` | Activates k8s startup block: `mc mirror` pulls from MinIO, creates `hiclaw-fs` symlink |
 | `HICLAW_MANAGER_RUNTIME` | `openclaw` | Selects OpenClaw gateway (vs CoPaw) |
+| `OPENCLAW_SYSTEMD_UNIT` | `openclaw-gateway` | Tells openclaw it is supervised by systemd, enabling the managed-service handoff path in `update.run`. Set by `start-manager-agent.sh` just before `exec openclaw gateway run`. Required on Linux hosts without real systemd — without it, `update.run` returns `managed-service-handoff-unavailable`. |
 
 ### Manager identity
 
@@ -336,6 +341,7 @@ Current host crontab (verify with `crontab -l`):
 | `workspace/.openclaw/openclaw.json.bak` | OpenClaw backup — kept in sync by the config keeper to prevent observe-recovery rollbacks |
 | `workspace/.openclaw/clawtalk/ws.log` | ClawTalk WebSocket service log |
 | `workspace/.openclaw-startup-pkg-hash` | openclaw package hash written by startup script; read by bootstrap keeper to detect updates |
+| `workspace/.openclaw-update-requested` | Update trigger marker. Written by the fake `systemd-run` at `/usr/local/bin/systemd-run` (installed by startup script) when openclaw's `update.run` invokes it. Consumed and deleted by `manager-bootstrap-keeper.sh`, which then runs `docker exec openclaw update --yes --json`. Host path: `/worksp/hiclaw/workspace/.openclaw-update-requested`; container path: `/root/manager-workspace/.openclaw-update-requested`. |
 
 ---
 

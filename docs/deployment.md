@@ -103,7 +103,7 @@ During the restart window the keeper may log `container startup script not reada
 |---|---|
 | `start-manager-agent.sh` content changed | No — patched silently; takes effect on next natural restart |
 | openclaw package hash changed (after "Update now") | Yes — `docker restart hiclaw-manager` |
-| Container was recreated (new container ID) | Resource limits re-applied; no extra restart |
+| Container was recreated (new container ID) | Resource limits re-applied (768 MB RAM, 2 GB swap, 1 CPU); no extra restart |
 
 This means `git push` of a script change does not log out the active user.
 
@@ -111,17 +111,31 @@ This means `git push` of a script change does not log out the active user.
 
 openclaw updates must go through the Control UI "Update now" button, not `npm install -g` directly.
 
-**Do NOT run `npm install -g openclaw` manually.** If swap is low (check: `free -h`), a direct npm install can OOM-kill the container mid-install, leaving a broken partial install with missing dependencies (e.g. `json5`). Recovery requires container recreation from the base image.
+**Do NOT run `npm install -g openclaw` manually** unless you have paused the keeper crons first (see warning below). If swap is low (check: `free -h`), a direct npm install can OOM-kill the container mid-install, leaving a broken partial install with missing dependencies (e.g. `json5`). Recovery requires container recreation from the base image.
 
-The safe update path:
+### Normal update flow (via Control UI)
+
 1. Open the OpenClaw Control UI (https://gateway.claw.designflow.app)
 2. Click "Update now"
-3. openclaw installs itself via the manager's controlled mechanism
-4. The bootstrap keeper detects the package hash change within 60 seconds
-5. The keeper runs `docker restart hiclaw-manager`
-6. On restart, `start-manager-agent.sh` updates `/usr/local/bin/openclaw` to point to the npm-installed binary and records the new package hash
+3. openclaw's update mechanism invokes the fake `systemd-run` at `/usr/local/bin/systemd-run` (installed by `start-manager-agent.sh`), which writes the marker file `/worksp/hiclaw/workspace/.openclaw-update-requested` on the host
+4. The gateway does an in-process SIGUSR1 restart — the container keeps running
+5. Within 60 seconds, `manager-bootstrap-keeper.sh` (cron, runs every minute) detects the marker, removes it, and runs `docker exec hiclaw-manager openclaw update --yes --json` with 768 MB RAM and 2 GB swap
+6. The keeper then compares the current openclaw `package.json` hash against the hash recorded at startup; if changed, it runs `docker restart hiclaw-manager`
+7. On restart, `start-manager-agent.sh` validates the npm install (checks that `json5/package.json` exists), updates `/usr/local/bin/openclaw` to point to the npm-installed binary, exports `OPENCLAW_SYSTEMD_UNIT=openclaw-gateway`, and records the new package hash
 
 After restart, verify: `docker exec hiclaw-manager openclaw --version`
+
+### Warning: manual docker exec update
+
+If you must run `docker exec hiclaw-manager openclaw update --yes --json` directly:
+
+1. **Pause both keeper crons first** (comment them out in `crontab -e`) — the config keeper and bootstrap keeper will otherwise interfere mid-install
+2. **Ensure swap is expanded** — the container must have `--memory-swap 2g` (not equal to `--memory`) before npm install runs:
+   ```bash
+   docker update --memory 768m --memory-swap 2g --cpus 1 hiclaw-manager
+   ```
+3. Run the update, then re-enable the crons
+4. Trigger a keeper run manually to pick up the hash change: `bash /worksp/hiclaw/manager-bootstrap-keeper.sh`
 
 ### openclaw symlink behavior
 

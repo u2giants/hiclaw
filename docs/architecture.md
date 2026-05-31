@@ -33,8 +33,12 @@ This repo is a host-ops wrapper around a running HiClaw deployment. It does not 
 - `HICLAW_MANAGER_RUNTIME=openclaw`
 - OpenClaw binary locations:
   - Base image: `/opt/openclaw/` (version 2026.4.14, built into image)
-  - After "Update now": `/usr/lib/node_modules/openclaw/` (npm global install)
-  - Active symlink: `/usr/local/bin/openclaw` — patched by startup script to prefer the npm-installed version if present, otherwise falls back to `/opt/openclaw/`
+  - After update: `/usr/lib/node_modules/openclaw/` (npm global install)
+  - Active symlink: `/usr/local/bin/openclaw` — patched by startup script to prefer the npm-installed version if present and valid (json5 check), otherwise falls back to `/opt/openclaw/`
+- Memory limits: 768m RAM, 2g swap, 1 CPU (swap was previously 768m — increased to prevent npm OOM during updates)
+- Fake systemd-run: startup script installs `/usr/local/bin/systemd-run` on every boot. This wrapper writes a `.openclaw-update-requested` marker file instead of launching a real systemd unit, allowing `openclaw update` to succeed on a host without systemd.
+- `OPENCLAW_SYSTEMD_UNIT=openclaw-gateway` — exported by startup script before exec. This env var makes OpenClaw believe it is supervised by systemd, so `update.run` follows the managed-service-handoff path (writing the marker) rather than returning `managed-service-handoff-unavailable`.
+- npm openclaw install validation: on every startup, `start-manager-agent.sh` checks for `/usr/lib/node_modules/openclaw/node_modules/json5/package.json` before activating the npm-installed version. If the check fails (missing or broken install), the broken install is removed and the symlink falls back to the base image `/opt/openclaw/`.
 - Bind mounts:
   - `/worksp/hiclaw/workspace` → `/root/manager-workspace`
   - `/home/ai` → `/host-share`
@@ -84,7 +88,9 @@ Step 2 is the most dangerous step — see [MinIO sync safety](#minio-sync-safety
 
 After the pull, the manager:
 - Fetches OpenRouter `/v1/models` and updates `openclaw.json` `contextWindow`/`maxTokens` for any model whose ID exactly matches an OpenRouter model ID. Pushes the updated config back to MinIO immediately so the background MinIO→local sync does not overwrite it.
-- Patches `/usr/local/bin/openclaw` symlink to prefer `/usr/lib/node_modules/openclaw/` (npm-installed) if present, otherwise `/opt/openclaw/`
+- Installs fake `/usr/local/bin/systemd-run` and exports `OPENCLAW_SYSTEMD_UNIT=openclaw-gateway`
+- Validates the npm openclaw install (json5 check); removes broken install and falls back to base image if invalid
+- Patches `/usr/local/bin/openclaw` symlink to prefer `/usr/lib/node_modules/openclaw/` (npm-installed, if valid) otherwise `/opt/openclaw/`
 - Writes the current openclaw package hash to `/root/manager-workspace/.openclaw-startup-pkg-hash` (host-visible via bind mount at `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`)
 - Bootstraps ClawTalk (creates bundled shim, clears `installs.json`)
 - Patches `openclaw.json` (sets `commands.restart = true` for initial gateway reload)
@@ -106,10 +112,12 @@ The controller's internal ManagerReconciler (proprietary code) pushes workspace 
 ### OpenClaw update mechanism
 
 1. Admin clicks "Update now" in the Control UI.
-2. OpenClaw runs `openclaw update` in-process, which executes `npm install -g openclaw@latest` and installs the new version to `/usr/lib/node_modules/openclaw/`.
-3. `manager-bootstrap-keeper.sh` (runs on the host) detects a hash mismatch between `/usr/lib/node_modules/openclaw/package.json` (or `/opt/openclaw/package.json` if npm path absent) and `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash`.
-4. The keeper recreates the hiclaw-manager container.
-5. On restart, `start-manager-agent.sh` patches the `/usr/local/bin/openclaw` symlink to the npm-installed version and records the new hash.
+2. OpenClaw calls `update.run` in-process. Because `OPENCLAW_SYSTEMD_UNIT=openclaw-gateway` is set, OpenClaw follows the managed-service-handoff path and invokes `/usr/local/bin/systemd-run` (the fake wrapper installed by startup script).
+3. The fake `systemd-run` writes a `.openclaw-update-requested` marker file (host-visible at `/worksp/hiclaw/workspace/.openclaw-update-requested` via bind mount).
+4. `manager-bootstrap-keeper.sh` (runs on the host) detects the marker and runs `docker exec hiclaw-manager openclaw update --yes --json` with `--memory-swap 2g` to allow npm install to complete without OOM. The marker is removed after the exec.
+5. The new version is installed to `/usr/lib/node_modules/openclaw/`.
+6. The keeper then detects a hash mismatch between `/usr/lib/node_modules/openclaw/package.json` (or `/opt/openclaw/package.json` if npm path absent) and `/worksp/hiclaw/workspace/.openclaw-startup-pkg-hash` and recreates the hiclaw-manager container.
+7. On restart, `start-manager-agent.sh` validates the npm install (json5 check), patches the `/usr/local/bin/openclaw` symlink to the npm-installed version, and records the new hash.
 
 ### Controller Element Web startup
 
