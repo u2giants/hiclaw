@@ -1618,28 +1618,26 @@ SYSRUN_EOF
     chmod +x /usr/local/bin/systemd-run
     log "Fake systemd-run installed for openclaw managed update handoff"
 
-    # Run any pending openclaw update requested via the UI on the previous run.
-    # The fake systemd-run writes this marker; we consume it here (before recording
-    # the startup hash) so the post-update hash is what the keeper sees.
-    _update_marker="/root/manager-workspace/.openclaw-update-requested"
-    if [ -f "$_update_marker" ]; then
-        log "Pending openclaw update detected (requested from UI); running openclaw update --yes --json..."
-        rm -f "$_update_marker"
-        openclaw update --yes --json 2>&1 | head -100 || true
-        log "openclaw update completed"
-        # Re-symlink in case npm install changed the path
-        if [ -f /usr/lib/node_modules/openclaw/openclaw.mjs ]; then
-            ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
-        fi
-    fi
-
     # If openclaw was updated via npm install -g, the npm-installed binary at
     # /usr/lib/node_modules/openclaw/ takes precedence over the image built-in
-    # at /opt/openclaw/. Ensure /usr/local/bin/openclaw symlink points to the
-    # npm version so 'exec openclaw' below picks it up correctly.
+    # at /opt/openclaw/. Validate the npm install before symlinking — a partial
+    # npm install (e.g. from an OOM mid-install) will crash the gateway with a
+    # missing dependency. If broken, remove it and fall back to the base image.
     if [ -f /usr/lib/node_modules/openclaw/openclaw.mjs ]; then
-        ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
-        log "OpenClaw symlink updated → npm-installed version"
+        # Validate the npm install: json5 is a required runtime dep that is missing
+        # from partial installs (OOM mid-install). Check before symlinking.
+        if [ -f /usr/lib/node_modules/openclaw/node_modules/json5/package.json ]; then
+            ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
+            log "OpenClaw symlink updated → npm-installed version"
+        else
+            log "WARNING: npm-installed openclaw is broken (json5 missing); removing and falling back to base image"
+            rm -rf /usr/lib/node_modules/openclaw/
+            ln -sf /opt/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
+            log "OpenClaw symlink reset → base image version"
+        fi
+    else
+        # Reset symlink in case a previous run pointed it at a now-deleted npm install
+        ln -sf /opt/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
     fi
 
     # Record openclaw package hash so the host-side bootstrap keeper can detect

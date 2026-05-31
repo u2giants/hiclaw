@@ -63,6 +63,22 @@ else
     fi
 fi
 
+# Run a pending openclaw update if the UI's "Update now" triggered the fake
+# systemd-run handoff. The fake systemd-run writes this marker; the in-process
+# SIGUSR1 restart that follows does NOT exit the container, so the startup
+# script never re-runs. We consume the marker here and run the update via
+# docker exec while the gateway is live — it's safe because the update installs
+# to /usr/lib/node_modules/openclaw/ (a different path than the running code).
+# The hash-change detection below then triggers docker restart to load the new binary.
+UPDATE_MARKER="/worksp/hiclaw/workspace/.openclaw-update-requested"
+if [ -f "${UPDATE_MARKER}" ]; then
+    echo "UI update requested (marker found); running openclaw update inside container..."
+    rm -f "${UPDATE_MARKER}"
+    docker exec "${CONTAINER_NAME}" openclaw update --yes --json 2>&1 | tail -5 || \
+        echo "warning: openclaw update exited non-zero; hash check will still run"
+    echo "openclaw update completed"
+fi
+
 # Detect openclaw in-container package updates and restart the container so
 # new hash-stamped module files are loaded fresh (in-process restarts don't
 # reload them — see Idiosyncratic Decision #5 in AGENTS.md).
