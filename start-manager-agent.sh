@@ -1604,6 +1604,35 @@ else
     rm -rf "${HOME}/.openclaw/matrix" 2>/dev/null || true
     log "Cleaned Matrix crypto storage (will re-establish E2EE sessions)"
 
+    # Install fake systemd-run so openclaw's managed-service update handoff works
+    # in Docker (no real systemd). On Linux, detectRespawnSupervisor() returns
+    # "systemd" only when OPENCLAW_SYSTEMD_UNIT is set; then it calls systemd-run
+    # to spawn the detached update helper. Our fake writes a marker file instead —
+    # the helper would be killed when the container exits anyway. On the next start
+    # (below) we detect the marker and run the actual update before launching the gateway.
+    cat > /usr/local/bin/systemd-run << 'SYSRUN_EOF'
+#!/bin/bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /root/manager-workspace/.openclaw-update-requested
+exit 0
+SYSRUN_EOF
+    chmod +x /usr/local/bin/systemd-run
+    log "Fake systemd-run installed for openclaw managed update handoff"
+
+    # Run any pending openclaw update requested via the UI on the previous run.
+    # The fake systemd-run writes this marker; we consume it here (before recording
+    # the startup hash) so the post-update hash is what the keeper sees.
+    _update_marker="/root/manager-workspace/.openclaw-update-requested"
+    if [ -f "$_update_marker" ]; then
+        log "Pending openclaw update detected (requested from UI); running openclaw update --yes --json..."
+        rm -f "$_update_marker"
+        openclaw update --yes --json 2>&1 | head -100 || true
+        log "openclaw update completed"
+        # Re-symlink in case npm install changed the path
+        if [ -f /usr/lib/node_modules/openclaw/openclaw.mjs ]; then
+            ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
+        fi
+    fi
+
     # If openclaw was updated via npm install -g, the npm-installed binary at
     # /usr/lib/node_modules/openclaw/ takes precedence over the image built-in
     # at /opt/openclaw/. Ensure /usr/local/bin/openclaw symlink points to the
@@ -1634,6 +1663,13 @@ else
     # Without this, config reload spawns a detached child and exits, then
     # supervisord restarts the CLI — resulting in two gateway processes.
     export OPENCLAW_NO_RESPAWN=1
+
+    # Tell openclaw a systemd service boundary exists so update.run uses the
+    # managed-service handoff path instead of returning handoff-unavailable.
+    # The actual "systemd-run" is our fake above — it writes a marker file and
+    # exits 0. The gateway then sends itself SIGUSR1, the container restarts,
+    # and the startup block above picks up the marker and runs the real update.
+    export OPENCLAW_SYSTEMD_UNIT="openclaw-gateway"
 
     # Optional matrix-plugin trace logging — when HICLAW_MATRIX_DEBUG=1 is set
     # in the manager environment (propagated by install / supervisord), turn on
