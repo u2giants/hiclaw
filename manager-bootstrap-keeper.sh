@@ -54,8 +54,8 @@ else
     # not persistent across docker rm + docker run — new containers start uncapped).
     # --memory-swap 2g gives ~1.2g swap (2g total - 768m RAM) so npm install
     # during openclaw update does not OOM with --memory-swap equal to --memory.
-    docker update --memory 768m --memory-swap 2g --cpus 1 "${CONTAINER_NAME}" >/dev/null \
-        && echo "resource limits re-applied (768m RAM, 2g swap, 1 CPU)" \
+    docker update --memory 1536m --memory-swap 3g --cpus 1 "${CONTAINER_NAME}" >/dev/null \
+        && echo "resource limits re-applied (1536m RAM, 3g swap, 1 CPU)" \
         || echo "warning: docker update failed; container may be uncapped"
 
     if [ "${container_hash}" != "${host_hash}" ]; then
