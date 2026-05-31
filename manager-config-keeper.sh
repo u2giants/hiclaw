@@ -63,11 +63,20 @@ try:
     # Migrate legacy Matrix group allow->enabled config for current OpenClaw schema.
     matrix_groups = d.setdefault('channels', {}).setdefault('matrix', {}).get('groups', {})
     if isinstance(matrix_groups, dict):
-        for group_id, group_cfg in matrix_groups.items():
+        for group_id, group_cfg in list(matrix_groups.items()):
             if isinstance(group_cfg, dict) and 'allow' in group_cfg and 'enabled' not in group_cfg:
                 group_cfg['enabled'] = group_cfg.pop('allow')
                 changed = True
                 print(f'matrix group {group_id} migrated from allow->enabled')
+
+    # Remove the '*' wildcard key — OpenClaw schema rejects additional properties in groups.
+    # This key causes every config reload and update.run to fail with
+    # 'managed-service-handoff-unavailable'. requireMention is covered by groupPolicy/groupAllowFrom.
+    if '*' in matrix_groups:
+        del matrix_groups['*']
+        d['channels']['matrix']['groups'] = matrix_groups
+        changed = True
+        print('matrix groups wildcard "*" removed (invalid in current OpenClaw schema)')
 
     # Remove clawtalk from plugins.load.paths if present
     # (plugins.load.paths only overrides bundled plugins; clawtalk loads from
