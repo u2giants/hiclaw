@@ -28,7 +28,7 @@ sudo python3 -c "
 import json, sys, hashlib, os, time
 
 path    = '/worksp/hiclaw/workspace/openclaw.json'
-bak     = '/worksp/hiclaw/workspace/.openclaw/openclaw.json.bak'
+bak     = '/worksp/hiclaw/workspace/openclaw.json.bak'
 health  = '/worksp/hiclaw/workspace/.openclaw/logs/config-health.json'
 api_key = 'cc_live_d5a5025bc0dc6894ac8acc6f867b336667e3e104'
 
