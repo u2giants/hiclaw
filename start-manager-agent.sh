@@ -722,7 +722,7 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
         | .channels.matrix.accessToken = $token | .channels.matrix.userId = $matrix_user_id | .models.providers["hiclaw-gateway"].apiKey = $key
         | ((.hooks.token // "") as $ht | if $ht == $key or $ht == ($key + "-hooks" | @base64) then del(.hooks) else . end)
         | .agents.defaults.model.primary = ("hiclaw-gateway/" + $model)
-        | .commands.restart = true
+        | del(.commands.restart)
         | .session = ((.session // {}) + {"dmScope":"main"})
         | .gateway.port = 18799
         | .gateway.bind = "lan"
@@ -924,7 +924,7 @@ if [ "${HICLAW_RUNTIME}" = "aliyun" ] || [ "${HICLAW_RUNTIME}" = "k8s" ]; then
         | .models.providers["hiclaw-gateway"].baseUrl = $gateway
         | .models.providers["hiclaw-gateway"].apiKey = $key
         | ((.hooks.token // "") as $ht | if $ht == $key or $ht == ($key + "-hooks" | @base64) then del(.hooks) else . end)
-        | .commands.restart = true
+        | del(.commands.restart)
         | if .agents.defaults.memorySearch then .agents.defaults.memorySearch.remote.baseUrl = $gateway | .agents.defaults.memorySearch.remote.apiKey = $key else . end' \
        /root/manager-workspace/openclaw.json > /tmp/openclaw-cloud.json && \
         mv /tmp/openclaw-cloud.json /root/manager-workspace/openclaw.json
@@ -1450,7 +1450,11 @@ entry["enabled"] = True
 entry_config = entry.setdefault("config", {})
 entry_config["apiKey"] = api_key
 entry_config["autoConnect"] = True
-config.setdefault("commands", {})["restart"] = True
+d_commands = config.get("commands")
+if isinstance(d_commands, dict):
+    d_commands.pop("restart", None)
+    if not d_commands:
+        config.pop("commands", None)
 with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
     f.write("\n")
@@ -1568,7 +1572,11 @@ whatsapp["enabled"] = True
 whatsapp.setdefault("dmPolicy", "pairing")
 whatsapp.setdefault("groupPolicy", "allowlist")
 
-config.setdefault("commands", {})["restart"] = True
+d_commands = config.get("commands")
+if isinstance(d_commands, dict):
+    d_commands.pop("restart", None)
+    if not d_commands:
+        config.pop("commands", None)
 with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
     f.write("\n")

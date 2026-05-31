@@ -38,21 +38,17 @@ try:
 
     changed = False
 
-    # Always write commands:{restart:true} to match the gateway's baseline.
-    # The gateway's last-accepted config (recorded in config-health.json) was written
-    # at initial container startup when the startup script set commands.restart=true.
-    # Any diff that changes the 'commands' field (null→{}, {}→null, or restart going
-    # true→absent) triggers a gateway restart. Writing {restart:true} here means the
-    # diff shows no change in commands — so the keeper's schema fixes (allow→enabled,
-    # whatsapp entries, etc.) are applied as a hot reload, not a full restart.
-    # The gateway processes commands.restart only when it CHANGES (diff-based), not
-    # when the value is simply true, so keeping it true at steady state is a no-op.
+    # In hiclaw v1.1.2, the ManagerReconciler writes commands=null. Writing
+    # commands:{restart:true} here would create a diff every reconciler cycle
+    # and cause a restart loop. Instead, clear commands.restart if present so
+    # the diff against the reconciler's null is always zero.
     current_cmds = d.get('commands', None)
-    desired_cmds = {'restart': True}
-    if current_cmds != desired_cmds:
-        d['commands'] = desired_cmds
+    if isinstance(current_cmds, dict) and 'restart' in current_cmds:
+        del current_cmds['restart']
+        if not current_cmds:
+            d.pop('commands', None)
         changed = True
-        print('commands set to {restart:true} (was: %s)' % json.dumps(current_cmds))
+        print('commands.restart cleared (was: true) to match reconciler baseline')
 
     # Route Matrix DMs to the same main session used by OpenClaw web chat.
     if d.get('session', {}).get('dmScope') != 'main':
@@ -108,32 +104,8 @@ try:
         changed = True
         print('agents.defaults.bootstrapMaxChars set to 20000')
 
-    # Ensure WhatsApp and ClawTalk are in the plugin allow list.
-    whatsapp_path = '/root/manager-workspace/.openclaw/npm/node_modules/@openclaw/whatsapp'
-    plugin_allow = d.setdefault('plugins', {}).setdefault('allow', [])
-    if 'whatsapp' not in plugin_allow:
-        plugin_allow.append('whatsapp')
-        changed = True
-        print('whatsapp plugin allow entry added')
-    if 'clawtalk' not in plugin_allow:
-        plugin_allow.append('clawtalk')
-        changed = True
-        print('clawtalk plugin allow entry added')
-
-    if whatsapp_path not in load_paths:
-        load_paths.append(whatsapp_path)
-        changed = True
-        print('whatsapp load path added')
-
-    whatsapp_entry = entries.setdefault('whatsapp', {})
-    if whatsapp_entry.get('enabled') is not True:
-        whatsapp_entry['enabled'] = True
-        changed = True
-        print('whatsapp plugin entry enabled')
-
     # Enforce correct contextWindow for models whose authoritative value is known.
-    # The startup OpenRouter sync may be overwritten by the ManagerReconciler
-    # restoring an old MinIO version; the keeper enforces the correct value every run.
+    # The ManagerReconciler restores stale values from its internal state.
     CONTEXT_OVERRIDES = {
         'deepseek/deepseek-v4-pro': 1048576,
         'deepseek/deepseek-v4-flash': 1048576,
@@ -144,20 +116,6 @@ try:
             m['contextWindow'] = CONTEXT_OVERRIDES[model_id]
             changed = True
             print(f'model {model_id} contextWindow enforced to {CONTEXT_OVERRIDES[model_id]}')
-
-    whatsapp_cfg = d.setdefault('channels', {}).setdefault('whatsapp', {})
-    if whatsapp_cfg.get('enabled') is not True:
-        whatsapp_cfg['enabled'] = True
-        changed = True
-        print('whatsapp channel enabled')
-    if 'dmPolicy' not in whatsapp_cfg:
-        whatsapp_cfg['dmPolicy'] = 'pairing'
-        changed = True
-        print('whatsapp dmPolicy set to pairing')
-    if 'groupPolicy' not in whatsapp_cfg:
-        whatsapp_cfg['groupPolicy'] = 'allowlist'
-        changed = True
-        print('whatsapp groupPolicy set to allowlist')
 
     if changed:
         content = json.dumps(d, indent=2).encode('utf-8')
