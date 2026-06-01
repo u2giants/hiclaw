@@ -78,7 +78,8 @@ if [ -f "${UPDATE_MARKER}" ]; then
     rm -f "${UPDATE_MARKER}"
     docker exec "${CONTAINER_NAME}" openclaw update --yes --json 2>&1 | tail -5 || \
         echo "warning: openclaw update exited non-zero; hash check will still run"
-    echo "openclaw update completed"
+    echo "openclaw update completed; waiting 30s for in-process SIGUSR1 restart to finish writing config before docker restart..."
+    sleep 30
 fi
 
 # Detect openclaw in-container package updates and restart the container so
