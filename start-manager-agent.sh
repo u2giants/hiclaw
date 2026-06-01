@@ -1625,13 +1625,15 @@ SYSRUN_EOF
     # npm install (e.g. from an OOM mid-install) will crash the gateway with a
     # missing dependency. If broken, remove it and fall back to the base image.
     if [ -f /usr/lib/node_modules/openclaw/openclaw.mjs ]; then
-        # Validate the npm install: json5 is a required runtime dep that is missing
-        # from partial installs (OOM mid-install). Check before symlinking.
-        if [ -f /usr/lib/node_modules/openclaw/node_modules/json5/package.json ]; then
+        # Validate the npm install: check key runtime deps missing from partial installs
+        # (OOM mid-install). json5 and openai/index.mjs are both required — the latter's
+        # .mjs files can be absent while .map files remain, causing a crash at first use.
+        if [ -f /usr/lib/node_modules/openclaw/node_modules/json5/package.json ] && \
+           [ -f /usr/lib/node_modules/openclaw/node_modules/openai/index.mjs ]; then
             ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
             log "OpenClaw symlink updated → npm-installed version"
         else
-            log "WARNING: npm-installed openclaw is broken (json5 missing); removing and falling back to base image"
+            log "WARNING: npm-installed openclaw is broken (json5 or openai/index.mjs missing); removing and falling back to base image"
             rm -rf /usr/lib/node_modules/openclaw/
             ln -sf /opt/openclaw/openclaw.mjs /usr/local/bin/openclaw 2>/dev/null || true
             log "OpenClaw symlink reset → base image version"
