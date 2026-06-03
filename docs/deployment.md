@@ -53,7 +53,7 @@ Everything on the host filesystem at `/worksp/hiclaw/` survives container recrea
 2. `build` — `docker buildx build`, pushed to GHCR as:
    - `ghcr.io/u2giants/novnc-desktop:latest`
    - `ghcr.io/u2giants/novnc-desktop:sha-<commit-sha>`
-3. `post-build` — calls Coolify API to restart the novnc service. **This step always fails** (the Coolify service was deleted 2026-05-10). Ignore the error — the image is built and pushed correctly regardless.
+3. `post-build` — calls the legacy Coolify API restart endpoint for noVNC. The referenced service was deleted 2026-05-10, so this step may fail even when the image build and push succeeded.
 
 The CI build does not deploy hiclaw-manager or hiclaw-controller. Those images come from Alibaba's registry.
 
@@ -61,17 +61,19 @@ The CI build does not deploy hiclaw-manager or hiclaw-controller. Those images c
 
 ## Required Host Cron Jobs
 
-All three must be present. Verify with `crontab -l`.
+All four must be present in the `ai` user's crontab. Verify with `sudo crontab -u ai -l`.
 
 ```cron
 * * * * * /worksp/hiclaw/manager-config-keeper.sh >> /worksp/hiclaw/manager-config-keeper.log 2>&1
 * * * * * /worksp/hiclaw/manager-bootstrap-keeper.sh >> /worksp/hiclaw/manager-bootstrap-keeper.log 2>&1
 * * * * * /worksp/hiclaw/controller-bootstrap-keeper.sh >> /worksp/hiclaw/controller-bootstrap-keeper.log 2>&1
+* * * * * /worksp/hiclaw/novnc-resource-keeper.sh >> /worksp/hiclaw/novnc-resource-keeper.log 2>&1
 ```
 
-If any are missing, add them with `crontab -e`. Missing keepers mean:
+If any are missing, add them with `sudo crontab -u ai -e`. Missing keepers mean:
 - manager startup script edits never reach the running container
 - memory limits are never re-applied after container recreation
+- novnc-desktop can run uncapped and cause host-wide Chrome/QtWebEngine OOM
 - openclaw update marker is never consumed (UI "Update now" does nothing)
 - openclaw.json drifts (wildcard groups key, stale contextWindow, observe-recovery reverts)
 
@@ -79,12 +81,19 @@ If any are missing, add them with `crontab -e`. Missing keepers mean:
 
 ## Container Resource Limits
 
-| Container | RAM | Total swap (--memory-swap) | CPUs |
-|---|---|---|---|
-| `hiclaw-manager` | 1536 MiB | 3072 MiB (~1.5 GiB of actual swap) | 1 |
-| `hiclaw-controller` | 2048 MiB | 2048 MiB (0 bytes of actual swap) | 2 |
+| Container | RAM | Total swap (--memory-swap) | CPUs | PID limit |
+|---|---|---|---|---|
+| `hiclaw-manager` | 1536 MiB | 3072 MiB (~1.5 GiB of actual swap) | 1 | Docker default |
+| `hiclaw-controller` | 3072 MiB | 4096 MiB (~1 GiB of actual swap) | 2 | 1024 |
+| `novnc-desktop` | 3072 MiB | 4096 MiB (~1 GiB of actual swap) | 2 | 250 |
 
 **Why manager swap is set high:** Docker's `--memory-swap` is the *total* of RAM + swap — not additive. With `--memory 1536m --memory-swap 1536m`, actual swap is 0 bytes. npm install during an openclaw update peaks well above 1536 MiB total and OOM-kills mid-install, leaving a broken partial install. Setting `--memory-swap 3g` gives ~1.5 GiB of actual swap headroom.
+
+## Host Memory Policy
+
+The host swapfile is `/swapfile`, mounted from `/etc/fstab`, sized at 12 GiB. Swappiness is pinned to `20` in `/etc/sysctl.d/99-hiclaw-memory.conf`.
+
+This is a host-level safety valve only. The first line of defense is still container limits, especially `novnc-desktop` (`3g` RAM, `4g` total RAM+swap, 250 PIDs). Do not remove those limits just because the host has more swap; without them Chrome/QtWebEngine can still drive a global OOM and make SSH unreachable.
 
 The keeper re-applies these limits after every container recreation:
 
@@ -93,7 +102,10 @@ The keeper re-applies these limits after every container recreation:
 docker update --memory 1536m --memory-swap 3g --cpus 1 hiclaw-manager
 
 # controller
-docker update --memory 2g --memory-swap 2g --cpus 2 hiclaw-controller
+docker update --memory 3g --memory-swap 4g --cpus 2 --pids-limit 1024 hiclaw-controller
+
+# novnc desktop
+docker update --memory 3g --memory-swap 4g --cpus 2 --pids-limit 250 novnc-desktop
 ```
 
 ---
@@ -136,6 +148,7 @@ docker stop novnc-desktop && docker rm novnc-desktop
 docker run -d --name novnc-desktop \
   --network e10kwzww46ljhrgz1qj08j6a --ip 10.0.5.4 \
   --dns 1.1.1.1 --dns 8.8.8.8 \
+  --memory 3g --memory-swap 4g --cpus 2 --pids-limit 250 \
   -v novnc-e10kwzww46ljhrgz1qj08j6a-config:/config \
   -e PUID=1000 -e PGID=1000 -e TZ=UTC -e "TITLE=HiClaw Desktop" \
   --shm-size=2g --restart unless-stopped \
@@ -236,7 +249,7 @@ Only do this if the normal marker flow is not available.
 
 ```bash
 # 1. Pause keeper crons
-crontab -e    # comment out all three keeper lines
+sudo crontab -u ai -e    # comment out keeper lines
 
 # 2. Ensure swap headroom
 docker update --memory 1536m --memory-swap 3g --cpus 1 hiclaw-manager
@@ -248,7 +261,7 @@ docker exec hiclaw-manager openclaw update --yes --json
 sleep 30
 
 # 5. Re-enable crons
-crontab -e    # uncomment keeper lines
+sudo crontab -u ai -e    # uncomment keeper lines
 
 # 6. Trigger keeper to detect hash change
 bash /worksp/hiclaw/manager-bootstrap-keeper.sh
@@ -323,7 +336,7 @@ docker network connect coolify hiclaw-controller 2>/dev/null || echo "already co
 docker network connect e10kwzww46ljhrgz1qj08j6a hiclaw-manager 2>/dev/null || echo "already connected"
 
 # 6. Verify cron
-crontab -l
+sudo crontab -u ai -l
 ```
 
 `fix-element-config.sh` is idempotent — safe to run again if any step was missed.
@@ -338,7 +351,7 @@ crontab -l
 
 **novnc-desktop env vars** are set by the `docker run` command (see "Starting the System" above) and stored in the named volume.
 
-**All variable names** are documented in `.env.example` at the repo root. Real values are never committed.
+**All variable names** are documented in `.env.example` at the repo root. Root `.env` is ignored. `oauth2-proxy/.env` is tracked in this deployment and contains live Google OAuth values.
 
 | Secret category | Storage location |
 |---|---|
@@ -347,7 +360,7 @@ crontab -l
 | Manager auth (gateway key, password, JWT) | `/data/hiclaw-secrets.env` |
 | Matrix registration token | `/data/hiclaw-secrets.env` |
 | MinIO secret key | `/data/hiclaw-secrets.env` |
-| Google OAuth credentials | `oauth2-proxy/.env` (never committed) |
+| Google OAuth credentials | `oauth2-proxy/.env` (tracked in this deployment) |
 | openclaw API key + Matrix token | `workspace/openclaw.json` (runtime, not committed) |
 
 ---
@@ -457,7 +470,7 @@ These actions will break the system:
 | `docker update --memory-swap 1536m hiclaw-manager` (same value as `--memory`) | Sets actual swap to 0 bytes; npm install OOM-kills the container during openclaw updates |
 | Write or `cp` to `novnc-desktop/cdp_proxy.py` on the host | Creates a new inode; Docker bind mount still points to old inode; container never sees the update. Use Edit tool or `sed -i` instead. |
 | Set `channels.matrix.groups["*"]` in openclaw.json | Rejected by OpenClaw schema; breaks `update.run` and every config reload |
-| Leave `commands.restart=true` in openclaw.json without keeper running | Gateway triggers restart on next reconciler diff; causes a 5-minute restart loop |
+| Change `commands` away from `{"restart": true}` in openclaw.json | Gateway triggers restart on next reconciler diff; causes a restart loop |
 | Deploy hiclaw-manager or hiclaw-controller via Coolify | They are not in Coolify. Coolify will not find them and will create duplicates. |
 | Run `openclaw update` directly inside the container while the marker mechanism is working | Bypasses swap-headroom enforcement and the 30s grace window; risks truncation and conflicts with keeper |
 | Set `--memory 1536m` without also increasing `--memory-swap` above 1536m | Equivalent to setting swap to 0 bytes; same OOM failure as above |

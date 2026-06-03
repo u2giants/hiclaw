@@ -91,7 +91,7 @@ CDP (browser automation):
 - **Networks:** `hiclaw-net` (10.0.2.0/24), `coolify` (Traefik access)
 - **Host port bindings:** `:18001` → 8001, `:18080` → 8080, `:18088` → 8088
 - **Managed by:** `controller-bootstrap-keeper.sh` (host cron)
-- **Resource limits:** 2g RAM, 2g swap, 2 CPUs (applied by keeper on each patch cycle)
+- **Resource limits:** 3g RAM, 4g swap (total RAM+swap), 2 CPUs, 1024 PIDs (applied by keeper on each patch cycle)
 
 ### hiclaw-manager
 
@@ -118,7 +118,8 @@ CDP (browser automation):
 - **Image:** `ghcr.io/u2giants/novnc-desktop:latest` (built from this repo)
 - **Contents:** Chrome browser, noVNC server, `cdp_proxy.py` (WebSocket bridge Chrome :9222 → :9223)
 - **Static IP:** `10.0.5.4` on network `e10kwzww46ljhrgz1qj08j6a` — hardcoded because hiclaw-manager config references this IP as the CDP endpoint
-- **Managed by:** manual `docker run` with `--restart unless-stopped`; not in Coolify
+- **Managed by:** `novnc-desktop/recreate.sh` with `--restart unless-stopped`; resource limits re-applied by `novnc-resource-keeper.sh`; not in Coolify
+- **Resource limits:** 3g RAM, 4g swap (total RAM+swap), 2 CPUs, 250 PIDs
 - **Purpose:** provides a live Chrome browser for CDP/Playwright-based browser automation tasks
 
 ### coolify-proxy (Traefik)
@@ -218,12 +219,12 @@ Writer 3: manager-config-keeper.sh (host cron, every ~60s)
 Flow on a typical reconciler cycle:
   1. Reconciler writes openclaw.json with commands.restart=true, allow keys, possibly bad model data
   2. Gateway file watcher fires → SIGUSR1 → in-process restart (due to commands change)
-  3. keeper runs: normalizes allow→enabled, removes commands, updates config-health.json
+  3. keeper runs: normalizes allow→enabled, restores commands to {"restart": true}, updates config-health.json
   4. Gateway file watcher fires again → hot reload only (no restart, no SIGUSR1)
 ```
 
-**Why `commands.restart` must not be left in the file:**
-The controller's reconciler writes `commands.restart=true` as a signal for the gateway to restart. Once the gateway restarts and records its startup config as the baseline in `config-health.json`, any subsequent write that includes `commands.restart=true` appears as a diff against `commands:{}` baseline and triggers another restart. The keeper writes `{}` (removes the key entirely) after startup to prevent this cycle.
+**Why `commands.restart` must stay true:**
+The gateway diffs live config changes against the startup baseline recorded in `config-health.json`. In the current stable state, that baseline expects `commands.restart=true`. The controller reconciler periodically writes `commands:null`; the keeper writes `{"restart": true}` back so the next diff matches the baseline and does not trigger a restart loop.
 
 ### 5.3 Manager startup sequence
 
@@ -324,7 +325,7 @@ Both containers see the same files simultaneously. Key files:
 6. manager-bootstrap-keeper.sh (host cron, ~60s interval) detects marker file:
    a. Removes marker
    b. Runs: docker exec hiclaw-manager openclaw update --yes --json
-      (--memory-swap 2g is set via docker update before this step)
+      (--memory-swap 3g is set via docker update before this step)
    c. Sleeps 30s (allows in-process SIGUSR1 write to complete — prevents truncation)
 7. Keeper computes hash of new /usr/lib/node_modules/openclaw/package.json
 8. Hash differs from .openclaw-startup-pkg-hash → docker restart hiclaw-manager
@@ -349,13 +350,14 @@ Both containers see the same files simultaneously. Key files:
 
 ### Keeper orchestration
 
-Four scripts run on the host (registered as cron jobs):
+Host-side keeper scripts maintain container/runtime state:
 
 | Script | Interval | Responsibility |
 |--------|----------|---------------|
 | `manager-bootstrap-keeper.sh` | ~60s | Sync start-manager-agent.sh into container; apply resource limits; consume update marker; detect version hash change |
 | `manager-config-keeper.sh` | ~60s | Normalize openclaw.json; enforce invariants; defeat observe-recovery |
 | `controller-bootstrap-keeper.sh` | ~60s | Sync start-element-web.sh and start-tuwunel.sh into controller; apply resource limits; restart if scripts changed |
+| `novnc-resource-keeper.sh` | ~60s | Enforce noVNC Docker limits; restart before Chrome memory or PID growth can cause global OOM |
 | `mcp-keeper.sh` | ~few min | Ensure mcp.servers.browser (Playwright CDP) is in openclaw.json |
 
 ---
@@ -437,9 +439,9 @@ The controller's reconciler pushes the workspace to MinIO. Because the manager's
 
 `cdp_proxy.py` is bind-mounted into `novnc-desktop`. Docker bind mounts track the inode, not the path. Replacing the file (using Write tool, `cp`, or `mv`) creates a new inode; the container continues reading from the original inode and never sees the update. Always edit using the Edit tool (in-place modification) or `sed -i`.
 
-### commands.restart baseline must match reconciler output
+### commands.restart baseline must stay true
 
-The gateway records its startup config as the baseline in `config-health.json` and triggers SIGUSR1 on any diff against that baseline. If the startup config has `commands.restart=true` and the keeper later writes `commands:{}`, the next reconciler write of `commands.restart=true` appears as no change (matches startup baseline) — correct. If the startup config has `commands:{}` (keeper ran first), a reconciler write of `commands.restart=true` appears as a diff — wrong, triggers restart loop. The startup script always sets `commands.restart=true` before starting the gateway; the keeper normalizes to `{}` afterward.
+The gateway records its startup config as the baseline in `config-health.json` and triggers SIGUSR1 on any diff against that baseline. The current stable baseline expects `commands.restart=true`. The controller reconciler can write `commands:null`; if that value persists, the next diff triggers a restart loop. `manager-config-keeper.sh` restores `commands` to `{"restart": true}` so live config matches the baseline.
 
 ### YOLO settings removed from startup config
 

@@ -38,7 +38,7 @@ cp /worksp/hiclaw/workspace/openclaw.json.bak /worksp/hiclaw/workspace/openclaw.
 docker ps --format "{{.Names}}\t{{.Status}}"
 
 # Check keeper crons are registered:
-crontab -l
+sudo crontab -u ai -l
 ```
 
 ## Docs

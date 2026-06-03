@@ -420,7 +420,7 @@ When the keeper makes changes, it also:
 | `agents.defaults.model.primary` | `HICLAW_DEFAULT_MODEL` |
 | `agents.defaults.models` | Rebuilt from full model list |
 | `agents.defaults.memorySearch` | `HICLAW_EMBEDDING_MODEL` and `HICLAW_AI_GATEWAY_URL` |
-| `commands` | Cleared (`del(.commands.restart)`) — keeper then writes `{restart:true}` |
+| `commands` | Keeper-enforced `{"restart": true}` matching the startup baseline |
 
 After the OpenRouter sync, the startup script immediately pushes the updated `openclaw.json` to MinIO so the background MinIO-to-Local sync loop (which starts a few seconds later) does not overwrite the fresh values with stale MinIO data.
 
@@ -562,15 +562,16 @@ This file is OpenClaw's config-health baseline. It records the hash, byte count,
 
 ## Cron Configuration
 
-All three keeper scripts run every minute:
+The always-on keeper scripts run every minute from the `ai` user's crontab:
 
 ```cron
 * * * * * /worksp/hiclaw/manager-config-keeper.sh >> /worksp/hiclaw/manager-config-keeper.log 2>&1
 * * * * * /worksp/hiclaw/manager-bootstrap-keeper.sh >> /worksp/hiclaw/manager-bootstrap-keeper.log 2>&1
 * * * * * /worksp/hiclaw/controller-bootstrap-keeper.sh >> /worksp/hiclaw/controller-bootstrap-keeper.log 2>&1
+* * * * * /worksp/hiclaw/novnc-resource-keeper.sh >> /worksp/hiclaw/novnc-resource-keeper.log 2>&1
 ```
 
-Verify the crontab is active: `crontab -l`
+Verify the crontab is active: `sudo crontab -u ai -l`
 
 `mcp-keeper.sh` is not in cron. Run it manually when the browser MCP tool disappears from the agent:
 
@@ -587,6 +588,7 @@ bash /worksp/hiclaw/mcp-keeper.sh
 | `/worksp/hiclaw/manager-config-keeper.log` | Config keeper output — what changed each minute |
 | `/worksp/hiclaw/manager-bootstrap-keeper.log` | Bootstrap keeper output — patch applied, update triggered, container restarted |
 | `/worksp/hiclaw/controller-bootstrap-keeper.log` | Controller bootstrap keeper output |
+| `/worksp/hiclaw/novnc-resource-keeper.log` | noVNC resource keeper output — Docker limit enforcement and pre-OOM restarts |
 | `workspace/.openclaw/logs/config-health.json` | OpenClaw config health baseline — updated atomically by config keeper |
 | `workspace/openclaw.json.bak` | OpenClaw backup — deleted by config keeper to prevent observe-recovery rollbacks |
 | `workspace/openclaw.json.clobbered.<ISO8601>` | Forensic copies of truncated or corrupted configs saved by the bootstrap keeper before restoring from last-good. 211 files from 2026-05-31 are evidence of the SIGUSR1 race condition fixed in commit a93488c. |

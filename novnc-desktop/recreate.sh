@@ -21,6 +21,10 @@ docker run -d \
   --ip 10.0.5.4 \
   --dns 1.1.1.1 \
   --dns 8.8.8.8 \
+  --memory 3g \
+  --memory-swap 4g \
+  --cpus 2 \
+  --pids-limit 250 \
   --shm-size 2g \
   -v "novnc-${NETWORK}-config:/config" \
   -e PUID=1000 \

@@ -1,3 +1,11 @@
 workspace/
 .state/
 *.log
+dist/
+node_modules/
+.cache/
+coverage/
+.ruff_cache/
+.DS_Store
+*.swp
+*.swo

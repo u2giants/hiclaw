@@ -69,8 +69,8 @@ echo "${container_id}" > "${STATE_FILE}"
 
 # Re-apply resource limits after container recreation (docker update is
 # not persistent across docker rm + docker run — new containers start uncapped).
-docker update --memory 2g --memory-swap 2g --cpus 2 "${CONTAINER_NAME}" >/dev/null \
-    && echo "resource limits re-applied (2g RAM, 2 CPUs)" \
+docker update --memory 3g --memory-swap 4g --cpus 2 --pids-limit 1024 "${CONTAINER_NAME}" >/dev/null \
+    && echo "resource limits re-applied (3g RAM, 4g total swap, 2 CPUs, 1024 PIDs)" \
     || echo "warning: docker update failed; container may be uncapped"
 
 if [ "${container_element_hash}" != "${host_element_hash}" ] || [ "${container_tuwunel_hash}" != "${host_tuwunel_hash}" ]; then

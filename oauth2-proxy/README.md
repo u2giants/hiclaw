@@ -8,12 +8,12 @@ Google OAuth gate for all `*.claw.designflow.app` web services.
 |------|---------|
 | `docker-compose.yml` | Container definition — provider, flags, network |
 | `allowed-emails.txt` | Whitelist of Google accounts permitted to log in |
-| `.env` | **Not committed.** Runtime credentials (see below) |
+| `.env` | Tracked in this deployment. Contains live Google OAuth credentials. |
 | `.env.example` | Variable names and descriptions |
 
 ## Required `.env`
 
-Create `oauth2-proxy/.env` (never commit it):
+`oauth2-proxy/.env` already exists in this single-server deployment and is tracked. Rotate values in place when credentials change:
 
 ```
 GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
@@ -32,7 +32,7 @@ To generate a cookie secret: `python3 -c "import os,base64; print(base64.b64enco
 cd /worksp/hiclaw/oauth2-proxy && docker compose up -d
 
 # Add a permitted email: edit allowed-emails.txt, then:
-docker compose up -d   # live reload — no restart needed for email list changes
+docker compose up -d
 
 # View logs
 docker logs oauth2-proxy --since 10m
