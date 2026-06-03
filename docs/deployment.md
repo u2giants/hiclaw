@@ -55,6 +55,8 @@ Everything on the host filesystem at `/worksp/hiclaw/` survives container recrea
    - `ghcr.io/u2giants/novnc-desktop:sha-<commit-sha>`
 3. `post-build` — calls the legacy Coolify API restart endpoint for noVNC. The referenced service was deleted 2026-05-10, so this step may fail even when the image build and push succeeded.
 
+**Current blocker:** run `26891511685` built the image layers but failed pushing to GHCR with `permission_denied: write_package`. Fix package permissions for the repo `GITHUB_TOKEN`, or add/use a PAT secret with `write:packages`, then rerun the workflow.
+
 The CI build does not deploy hiclaw-manager or hiclaw-controller. Those images come from Alibaba's registry.
 
 ---
@@ -351,7 +353,7 @@ sudo crontab -u ai -l
 
 **novnc-desktop env vars** are set by the `docker run` command (see "Starting the System" above) and stored in the named volume.
 
-**All variable names** are documented in `.env.example` at the repo root. Root `.env` is ignored. `oauth2-proxy/.env` is tracked in this deployment and contains live Google OAuth values.
+**All root variable names** are documented in `.env.example`; oauth2-proxy variables are documented in `oauth2-proxy/.env.example`. Root `.env` and `oauth2-proxy/.env` are ignored.
 
 | Secret category | Storage location |
 |---|---|
@@ -360,7 +362,7 @@ sudo crontab -u ai -l
 | Manager auth (gateway key, password, JWT) | `/data/hiclaw-secrets.env` |
 | Matrix registration token | `/data/hiclaw-secrets.env` |
 | MinIO secret key | `/data/hiclaw-secrets.env` |
-| Google OAuth credentials | `oauth2-proxy/.env` (tracked in this deployment) |
+| Google OAuth credentials | `oauth2-proxy/.env` (server-local, ignored by git) |
 | openclaw API key + Matrix token | `workspace/openclaw.json` (runtime, not committed) |
 
 ---

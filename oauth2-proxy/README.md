@@ -8,12 +8,12 @@ Google OAuth gate for all `*.claw.designflow.app` web services.
 |------|---------|
 | `docker-compose.yml` | Container definition — provider, flags, network |
 | `allowed-emails.txt` | Whitelist of Google accounts permitted to log in |
-| `.env` | Tracked in this deployment. Contains live Google OAuth credentials. |
+| `.env` | Ignored by git. Contains live Google OAuth credentials on the server. |
 | `.env.example` | Variable names and descriptions |
 
 ## Required `.env`
 
-`oauth2-proxy/.env` already exists in this single-server deployment and is tracked. Rotate values in place when credentials change:
+`oauth2-proxy/.env` exists on the server and is ignored by git. Rotate values in place when credentials change:
 
 ```
 GOOGLE_CLIENT_ID=<your-client-id>.apps.googleusercontent.com

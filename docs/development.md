@@ -47,8 +47,11 @@ docker exec hiclaw-controller curl -s -o /dev/null -w "%{http_code}" http://hicl
 docker exec hiclaw-controller curl -s -o /dev/null -w "%{http_code}" http://localhost:18888/
 # Expected: 200 (or 502 if manager is down)
 
-# Matrix server health
-curl -s http://localhost:18080/_matrix/client/versions | python3 -m json.tool | head -5
+# Matrix server health from inside controller
+docker exec hiclaw-controller curl -s http://127.0.0.1:6167/_matrix/client/versions | python3 -m json.tool | head -5
+
+# Matrix public route health
+curl -s https://claw.designflow.app/_matrix/client/versions | python3 -m json.tool | head -5
 
 # MinIO health (from controller)
 docker exec hiclaw-controller mc ls hiclaw/hiclaw-storage/manager/ | head -5

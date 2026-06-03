@@ -81,7 +81,7 @@ These are repo-owned files or scripted modifications that compensate for upstrea
 | `novnc-desktop/cdp_proxy.py` | Proxies Chrome CDP from `:9222` to `:9223`. | OpenClaw Playwright MCP uses a stable CDP endpoint at `10.0.5.4:9223`. | If bind-mounted live, edit in place to preserve inode. |
 | `start-element-web.sh` | Generates Element Web config, nginx routes, JS injection, control-panel proxy, chat API helper. | Enables Google OAuth gated Element and Control UI auto-login. | Element Web or OpenClaw UI changes can break injected JS/sub_filter assumptions. |
 | `fix-element-config.sh` | Idempotent repair for post-upgrade controller config. | Restores generated config after upstream image changes. | Hardcoded repair assumptions must be checked after upgrades. |
-| `oauth2-proxy/.env` | Contains live Google OAuth credentials, committed in this deployment. | Current single-server deployment loads credentials from this file. | Secret exposure risk; rotate if repo access changes. |
+| `oauth2-proxy/.env.example` | Documents the Google OAuth variables used by `oauth2-proxy/docker-compose.yml`. | Keeps the ignored live `.env` reproducible without committing secrets. | Must stay aligned with compose variable names. |
 
 ---
 
@@ -403,7 +403,7 @@ List variables only; do not paste secret values into docs.
 | `COOLIFY_API_TOKEN` | Coolify API token | GitHub secret / Coolify | no | workflow only |
 | `COOLIFY_SERVICE_UUID` | Deleted noVNC Coolify service UUID | GitHub secret | no | workflow only, currently stale |
 
-`oauth2-proxy/.env` currently contains real Google OAuth credentials and is committed/tracked for this single-server deployment. Root `.env` remains ignored; `.env.example` is the template.
+`oauth2-proxy/.env` contains live Google OAuth credentials on the server and is ignored by git. Root `.env` is also ignored; `.env.example` files are templates only.
 
 ---
 
@@ -630,9 +630,9 @@ Never run `novnc-desktop` uncapped; leave it stopped when unused.
 | Status | Item | Owner/next action |
 |---|---|---|
 | open | Static context windows for non-OpenRouter alias model IDs (`gpt-5.4`, `claude-opus-4-6`, `kimi-k2.5`, etc.). | Add a mapping table or migrate aliases to canonical IDs, then update `start-manager-agent.sh` and docs. |
-| open | Rebuild and push `ghcr.io/u2giants/novnc-desktop` so the latest Chrome wrapper/resource-related source is in GHCR. | Push changes touching `novnc-desktop/**` or manually trigger `Build and Push`; then run `novnc-desktop/recreate.sh`. |
+| blocked | Rebuild and push `ghcr.io/u2giants/novnc-desktop` so the latest Chrome wrapper/resource-related source is in GHCR. | GitHub Actions build succeeded locally through image export but GHCR push failed with `permission_denied: write_package` on run `26891511685`. Grant package write permission to `GITHUB_TOKEN`/package settings or add a PAT secret with `write:packages`, then rerun `Build and Push` and run `novnc-desktop/recreate.sh`. |
 | open | Move ClawTalk modifications from ephemeral container overlay to a host-mounted durable path. | Design mount/bootstrap path; update `start-manager-agent.sh` and docs. |
-| open | Verify Tuwunel health after current docs/ops changes. | Run Matrix health checks in `docs/development.md`; document any finding if behavior differs. |
-| open | Set up git pull automation on the server. | Decide whether automatic pull is acceptable for this single-server ops repo. |
-| open | Clean up historical `workspace/openclaw.json.clobbered.*` files if disk space is needed. | Confirm no new clobbered files are accumulating, then delete old forensic files. |
+| done | Verify Tuwunel health after current docs/ops changes. | Completed 2026-06-03: `docker exec hiclaw-controller curl http://127.0.0.1:6167/_matrix/client/versions` and `https://claw.designflow.app/_matrix/client/versions` both returned 200. |
+| deferred | Set up git pull automation on the server. | Decision 2026-06-03: do not auto-pull production scripts without an explicit deployment gate. Keep manual `git pull` unless a safer signed/tagged deployment mechanism is designed. |
+| done | Clean up historical `workspace/openclaw.json.clobbered.*` files if disk space is needed. | Completed 2026-06-03: confirmed files were historical May 31/June 1 artifacts and removed 211 files; current count is 0. |
 | deferred | Move manager/controller/oauth2-proxy to Coolify. | Only revisit as a planned migration; current keeper model works and is documented. |
