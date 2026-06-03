@@ -74,7 +74,7 @@ These are repo-owned files or scripted modifications that compensate for upstrea
 |---|---|---|---|
 | `start-manager-agent.sh` | Patches `openclaw.json`, installs fake `systemd-run`, validates npm OpenClaw install with `json5/package.json` and `openai/index.mjs`, bootstraps ClawTalk/WhatsApp, records package hash. | Makes OpenClaw usable in Docker, prevents update and partial-install crash loops, keeps config compatible with the reconciler. | Upstream OpenClaw/HiClaw changes can invalidate jq patches, plugin paths, or update assumptions. |
 | `manager-bootstrap-keeper.sh` | Copies host startup script into `hiclaw-manager`, enforces `1536m/3g/1CPU`, consumes `.openclaw-update-requested`, waits 30s before restart, restarts on package hash change. | Makes startup overrides durable and prevents openclaw update truncation/OOM failures. | Any OpenClaw update-flow change must preserve the marker, sleep, and validation sequence. |
-| `manager-config-keeper.sh` | Normalizes `openclaw.json`, strips invalid wildcard groups, enforces `commands: {"restart": true}`, updates `config-health.json` atomically. | Controller reconciler writes values OpenClaw rejects or values that trigger restart loops. | Reconciler/schema changes require rechecking all enforced fields. |
+| `manager-config-keeper.sh` | Normalizes `openclaw.json`, strips invalid wildcard groups, clears `commands.restart` if present, updates `config-health.json` atomically. | Controller reconciler/startup paths can write values OpenClaw rejects or values that trigger restart loops. | Reconciler/schema changes require rechecking all enforced fields. |
 | `controller-bootstrap-keeper.sh` | Copies `start-element-web.sh` and `start-tuwunel.sh` into `hiclaw-controller`, enforces `3g/4g/2CPU/1024PIDs`, restarts when scripts change. | Keeps controller nginx/Element/Tuwunel customizations durable and gives controller enough memory headroom. | Upstream controller startup paths may change. |
 | `novnc-resource-keeper.sh` | Enforces `novnc-desktop` limits (`3g` RAM, `4g` total memory+swap, 2 CPUs, 250 PIDs) and restarts it before memory/PID danger thresholds. | Prevents Chrome/QtWebEngine from causing host-wide OOM. | Thresholds may need tuning if browser automation workload grows. |
 | `novnc-desktop/Dockerfile` | Installs Google Chrome, Dropbox, Insync; wraps Chrome with Docker-safe flags and Singleton guard. | Provides browser automation target and prevents double-Chrome OOM. | Rebuild required after edits; upstream webtop/Chrome behavior can change. |
@@ -224,19 +224,19 @@ Direct updates previously caused npm partial installs and truncated `openclaw.js
 Do not change because:
 Bypassing the keeper can crash the gateway or corrupt the live config.
 
-### `commands` must stay `{"restart": true}`
+### `commands.restart` must not persist
 
 Looks like:
-Persisting a restart command should cause an infinite restart loop.
+Keeping `commands.restart=true` in `openclaw.json` should be harmless or even required for restarts.
 
 Actually:
-OpenClaw diffs against its startup baseline. The current stable baseline expects `commands.restart=true`; `manager-config-keeper.sh` writes the same value so reconciler changes produce no diff.
+The current stable live config has no `commands` key. `start-manager-agent.sh` deletes `commands.restart` before launch, and `manager-config-keeper.sh` clears it if an upstream write reintroduces it.
 
 Why:
-The upstream ManagerReconciler periodically writes `commands:null` and wildcard Matrix groups. The keeper normalizes those writes.
+OpenClaw diffs live config changes against its startup baseline. A persistent `commands.restart` can turn routine reconciler/config writes into recurring SIGUSR1 restarts.
 
 Do not change because:
-`commands:{}`, `null`, or `false` cause recurring SIGUSR1 restart loops.
+The stable state is `commands` absent. If this changes, verify the live baseline and gateway logs before updating keeper behavior.
 
 ### `channels.matrix.groups["*"]` must be stripped
 
@@ -448,10 +448,10 @@ Root cause:
 Startup wrote a `commands.restart` value that differed from the reconciler/baseline flow.
 
 Recovery:
-Changed startup/config keeper behavior so `commands` converges to `{"restart": true}`.
+Changed startup/config keeper behavior so `commands.restart` is removed before/after startup.
 
 Rule added to prevent recurrence:
-Do not write `commands:{}`, `null`, or `false`; keeper owns this field.
+Do not persist `commands.restart`; keeper owns this field.
 
 ### 2026-05-08 Chrome double-instance OOM
 
@@ -629,9 +629,9 @@ Never run `novnc-desktop` uncapped; leave it stopped when unused.
 
 | Status | Item | Owner/next action |
 |---|---|---|
-| open | Static context windows for non-OpenRouter alias model IDs (`gpt-5.4`, `claude-opus-4-6`, `kimi-k2.5`, etc.). | Add a mapping table or migrate aliases to canonical IDs, then update `start-manager-agent.sh` and docs. |
+| done | Static context windows for non-OpenRouter alias model IDs (`gpt-5.4`, `claude-opus-4-6`, `kimi-k2.5`, etc.). | Completed 2026-06-03: `manager-config-keeper.sh` enforces a static context-window table for all current gateway alias IDs, while startup OpenRouter metadata sync remains best-effort for canonical IDs. |
 | blocked | Rebuild and push `ghcr.io/u2giants/novnc-desktop` so the latest Chrome wrapper/resource-related source is in GHCR. | GitHub Actions build succeeded locally through image export but GHCR push failed with `permission_denied: write_package` on run `26891511685`. Grant package write permission to `GITHUB_TOKEN`/package settings or add a PAT secret with `write:packages`, then rerun `Build and Push` and run `novnc-desktop/recreate.sh`. |
-| open | Move ClawTalk modifications from ephemeral container overlay to a host-mounted durable path. | Design mount/bootstrap path; update `start-manager-agent.sh` and docs. |
+| done | Move ClawTalk modifications from ephemeral container overlay to a host-mounted durable path. | Completed 2026-06-03: `start-manager-agent.sh` writes the ClawTalk bundled shim to `/root/manager-workspace/.openclaw/bundled-extensions/clawtalk` and symlinks `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk` to it on startup. Takes effect on next manager restart. |
 | done | Verify Tuwunel health after current docs/ops changes. | Completed 2026-06-03: `docker exec hiclaw-controller curl http://127.0.0.1:6167/_matrix/client/versions` and `https://claw.designflow.app/_matrix/client/versions` both returned 200. |
 | deferred | Set up git pull automation on the server. | Decision 2026-06-03: do not auto-pull production scripts without an explicit deployment gate. Keep manual `git pull` unless a safer signed/tagged deployment mechanism is designed. |
 | done | Clean up historical `workspace/openclaw.json.clobbered.*` files if disk space is needed. | Completed 2026-06-03: confirmed files were historical May 31/June 1 artifacts and removed 211 files; current count is 0. |

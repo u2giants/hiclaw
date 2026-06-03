@@ -782,9 +782,10 @@ if [ -f /root/manager-workspace/openclaw.json ]; then
         mv /tmp/openclaw.json.tmp /root/manager-workspace/openclaw.json
 
     # Sync model metadata (contextWindow, maxTokens) from OpenRouter.
-    # OpenRouter is the authoritative source; the static known-models.json values
-    # are often stale. Only models whose IDs match an OpenRouter model are updated —
-    # gateway-alias models (e.g. "deepseek-chat", "gpt-5.4") are left as-is.
+    # OpenRouter is the authoritative source when IDs match. Gateway aliases are
+    # mapped to canonical IDs above before this sync; manager-config-keeper.sh
+    # also enforces static context windows for alias IDs if the reconciler restores
+    # them later.
     # Response is written to a temp file to avoid "Argument list too long" errors.
     if [ -n "${HICLAW_LLM_API_KEY:-}" ]; then
         curl -sf --max-time 10 \
@@ -1373,6 +1374,7 @@ bootstrap_clawtalk_plugin() {
     local clawtalk_api_key="${CLAWTALK_API_KEY:-cc_live_d5a5025bc0dc6894ac8acc6f867b336667e3e104}"
     local plugin_dir="/root/manager-workspace/.openclaw/npm/node_modules/clawtalk"
     local bundled_dir="/usr/lib/node_modules/openclaw/dist/extensions/clawtalk"
+    local host_bundled_dir="/root/manager-workspace/.openclaw/bundled-extensions/clawtalk"
     local config_path="/root/manager-workspace/openclaw.json"
     local installs_path="/root/manager-workspace/.openclaw/plugins/installs.json"
 
@@ -1460,13 +1462,14 @@ if installs_path.exists():
         f.write("\n")
 PY
 
-    rm -rf "${bundled_dir}"
-    mkdir -p "${bundled_dir}"
-    cp "${plugin_dir}/openclaw.plugin.json" "${bundled_dir}/openclaw.plugin.json"
-    cat > "${bundled_dir}/package.json" <<'JSON'
+    rm -rf "${host_bundled_dir}" "${bundled_dir}"
+    mkdir -p "${host_bundled_dir}" "$(dirname "${bundled_dir}")"
+    ln -sfn "${host_bundled_dir}" "${bundled_dir}"
+    cp "${plugin_dir}/openclaw.plugin.json" "${host_bundled_dir}/openclaw.plugin.json"
+    cat > "${host_bundled_dir}/package.json" <<'JSON'
 {"name":"clawtalk","version":"0.2.3","main":"./index.js"}
 JSON
-    cat > "${bundled_dir}/index.js" <<'JS'
+    cat > "${host_bundled_dir}/index.js" <<'JS'
 const fs = require('node:fs');
 const path = require('node:path');
 const mod = require('/root/manager-workspace/.openclaw/npm/node_modules/clawtalk/build/index.js');
@@ -1498,15 +1501,15 @@ module.exports = wrappedPlugin;
 module.exports.default = wrappedPlugin;
 JS
     if [ -d "${plugin_dir}/skills" ]; then
-        cp -r "${plugin_dir}/skills" "${bundled_dir}/skills"
+        cp -r "${plugin_dir}/skills" "${host_bundled_dir}/skills"
     fi
 
     # Delete installs.json so OpenClaw does a fresh plugin scan on the next gateway
-    # start and discovers the bundled shim created above. Without this, installs.json
+    # start and discovers the bundled shim linked above. Without this, installs.json
     # (written by the Python step before the shim exists) won't include clawtalk and
     # the gateway reports "plugin not found: clawtalk" at startup.
     rm -f "${installs_path}"
-    log "ClawTalk bootstrap completed (installs.json cleared for fresh plugin scan)"
+    log "ClawTalk bootstrap completed (host-backed bundled shim linked; installs.json cleared for fresh plugin scan)"
 }
 
 bootstrap_whatsapp_plugin() {

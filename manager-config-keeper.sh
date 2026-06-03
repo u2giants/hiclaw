@@ -76,7 +76,7 @@ try:
 
     # Remove clawtalk from plugins.load.paths if present
     # (plugins.load.paths only overrides bundled plugins; clawtalk loads from
-    #  the global installed copy at .openclaw/extensions/clawtalk/ instead)
+    #  the bundled extension symlink created by start-manager-agent.sh instead)
     clawtalk_path = '/root/manager-workspace/.openclaw/npm/node_modules/clawtalk'
     load_paths = d.setdefault('plugins', {}).setdefault('load', {}).setdefault('paths', [])
     if clawtalk_path in load_paths:
@@ -104,9 +104,27 @@ try:
         changed = True
         print('agents.defaults.bootstrapMaxChars set to 20000')
 
-    # Enforce correct contextWindow for models whose authoritative value is known.
-    # The ManagerReconciler restores stale values from its internal state.
+    # Enforce contextWindow for models whose values are known locally.
+    # OpenRouter sync handles canonical IDs at startup when possible; this
+    # table keeps gateway alias IDs stable when the reconciler restores stale
+    # values from its internal state.
     CONTEXT_OVERRIDES = {
+        'gpt-5.4': 150000,
+        'gpt-5.3-codex': 400000,
+        'gpt-5-mini': 400000,
+        'gpt-5-nano': 400000,
+        'claude-opus-4-6': 1000000,
+        'claude-sonnet-4-6': 1000000,
+        'claude-haiku-4-5': 200000,
+        'qwen3.6-plus': 200000,
+        'qwen3.5-plus': 200000,
+        'deepseek-chat': 256000,
+        'deepseek-reasoner': 256000,
+        'kimi-k2.5': 256000,
+        'glm-5': 200000,
+        'MiniMax-M2.7': 200000,
+        'MiniMax-M2.7-highspeed': 200000,
+        'MiniMax-M2.5': 200000,
         'deepseek/deepseek-v4-pro': 1048576,
         'deepseek/deepseek-v4-flash': 1048576,
     }

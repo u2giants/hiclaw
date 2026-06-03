@@ -116,7 +116,7 @@ docker exec hiclaw-manager rm -rf /usr/lib/node_modules/openclaw/
 Then trigger a proper update (see "Triggering an OpenClaw Version Update" below).
 
 **3. Reconciler diff loop (`commands` drift)**
-OpenClaw's config reconciler writes `commands: null` every ~47 seconds. The config keeper must restore `commands` to `{"restart": true}` so the file matches the startup baseline and avoids a SIGUSR1 restart loop.
+The stable live config has no `commands` key. If `commands.restart` persists, routine reconciler/config writes can trigger a SIGUSR1 restart loop.
 Fix: run the config keeper manually.
 ```bash
 bash /worksp/hiclaw/manager-config-keeper.sh
@@ -180,7 +180,7 @@ docker restart hiclaw-manager
 
 **Do NOT:**
 - Edit openclaw.json while a jq pipeline is also writing it (the startup script, keeper, or MinIO sync) — partial writes truncate the file.
-- Change `commands` away from `{"restart": true}` — the reconciler loop will cause continuous restarts.
+- Persist `commands.restart` — the reconciler loop can cause continuous restarts.
 - Add a wildcard `"*"` key to `channels.matrix.groups` — OpenClaw schema rejects it.
 
 **After editing, the MinIO sync pushes the change automatically within 10 seconds.**
@@ -218,7 +218,7 @@ docker exec hiclaw-manager openclaw --version
 bash /worksp/hiclaw/manager-bootstrap-keeper.sh
 
 # Config keeper: stabilizes openclaw.json fields (clawtalk entry, bootstrapMaxChars,
-# dmScope=main, commands={"restart":true}, no wildcard groups, context window enforcement)
+# dmScope=main, no commands.restart, no wildcard groups, context window enforcement)
 bash /worksp/hiclaw/manager-config-keeper.sh
 ```
 

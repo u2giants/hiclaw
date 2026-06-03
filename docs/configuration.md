@@ -208,24 +208,20 @@ OpenClaw also maintains a backup at `workspace/.openclaw/openclaw.json.bak` and 
 
 ### `commands`
 
-```json
-"commands": { "restart": true }
-```
-
 **This is the most non-obvious part of the system. Read this before touching anything related to `commands`.**
 
-The gateway uses a startup-time baseline for reload diffs, not its in-memory running state. When the container starts, `start-manager-agent.sh` writes `commands.restart = true` before launching the gateway. The gateway records this as its permanent "last known good" in `config-health.json`. Every subsequent file change is diffed against that startup baseline — not against the current in-memory state.
+The gateway uses a startup-time baseline for reload diffs, not its in-memory running state. In the current stable path, `start-manager-agent.sh` removes `commands.restart` before launching the gateway, and `manager-config-keeper.sh` removes it again if it appears later. The stable host file currently has no `commands` key.
 
-If `commands` changes in the diff, the gateway triggers a full in-process restart (SIGUSR1) instead of a hot reload. The ManagerReconciler writes `commands: null` every ~47 seconds. When the keeper writes `commands: {"restart": true}` to match the startup baseline, the diff for `commands` is zero and no restart occurs.
+If `commands` changes in a way OpenClaw treats as a restart signal, the gateway triggers a full in-process restart (SIGUSR1) instead of a hot reload. A persistent `commands.restart` was a previous restart-loop source.
 
-| Keeper writes | Diff vs startup baseline | Result |
-|---|---|---|
-| `{"restart": true}` | No change | Hot reload only |
-| `{}` | `commands.restart` removed | Full restart triggered |
-| `null` | `commands` changed | Full restart triggered |
-| `{"restart": false}` | `commands.restart` changed | Full restart triggered |
+| File state | Result |
+|---|---|
+| No `commands` key | Current stable state |
+| `commands: null` | Reconciler drift; keeper may leave/normalize depending on full config state |
+| `{"restart": true}` | Must be cleared by startup/keeper |
+| `{"restart": false}` | Invalid for this deployment; clear it |
 
-**Do not write any value other than `{"restart": true}` to `commands`.** A broken state produces a 5-minute restart loop visible in `docker logs hiclaw-manager` as repeated `[reload] config change requires gateway restart (commands.restart)` entries.
+**Do not persist `commands.restart`.** A broken state produces a restart loop visible in `docker logs hiclaw-manager` as repeated restart/reload entries.
 
 To inspect the startup baseline:
 
@@ -243,7 +239,7 @@ To verify the keeper is writing the correct value:
 
 ```bash
 sudo python3 -c "import json; d=json.load(open('/worksp/hiclaw/workspace/openclaw.json')); print('commands:', d.get('commands'))"
-# Expected: {'restart': True}
+# Expected: None
 ```
 
 ### `models`
@@ -348,7 +344,7 @@ The OpenClaw schema rejects unknown model fields. The startup script strips the 
 }
 ```
 
-`plugins.load.paths` must not contain the clawtalk npm path (`/root/manager-workspace/.openclaw/npm/node_modules/clawtalk`). The config keeper removes it if present. ClawTalk loads from the bundled shim created by the startup script at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`.
+`plugins.load.paths` must not contain the clawtalk npm path (`/root/manager-workspace/.openclaw/npm/node_modules/clawtalk`). The config keeper removes it if present. ClawTalk loads from the bundled shim exposed at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`, which the startup script symlinks to host-backed workspace content at `/root/manager-workspace/.openclaw/bundled-extensions/clawtalk/`.
 
 The clawtalk `apiKey` (`cc_live_d5a5025bc0dc6894ac8acc6f867b336667e3e104`) is hardcoded in `manager-config-keeper.sh`. It is a service account key for the ClawTalk relay, not a user credential.
 
@@ -388,15 +384,14 @@ The gateway may strip the `mcp` key during a MinIO sync cycle. `mcp-keeper.sh` r
 
 | Field | Enforced value | Why |
 |---|---|---|
-| `commands` | `{"restart": true}` | Matches startup baseline; prevents gateway restart loop on every reconciler write |
+| `commands.restart` | Removed if present | Prevents restart-trigger field from persisting in live config |
 | `session.dmScope` | `"main"` | Keeps HiClaw chat and OpenClaw web chat on one shared session |
 | `channels.matrix.groups["*"]` | Removed if present | OpenClaw schema rejects wildcard key; its presence breaks all config reloads |
 | `channels.matrix.groups[*].allow` | Renamed to `enabled` | Controller writes `allow`; schema requires `enabled` |
-| `plugins.load.paths` | Clawtalk npm path removed | ClawTalk loads from bundled shim, not npm path |
+| `plugins.load.paths` | Clawtalk npm path removed | ClawTalk loads from the host-backed bundled shim, not the npm path |
 | `plugins.entries.clawtalk` | Added if absent | Ensures ClawTalk is always registered |
 | `agents.defaults.bootstrapMaxChars` | `20000` | Prevents AGENTS.md truncation at the default 8000-char limit |
-| `models.providers.hiclaw-gateway[deepseek/deepseek-v4-pro].contextWindow` | `1048576` | Reconciler restores stale values from its internal state |
-| `models.providers.hiclaw-gateway[deepseek/deepseek-v4-flash].contextWindow` | `1048576` | Same |
+| `models.providers.hiclaw-gateway.models[*].contextWindow` | Static override table for current alias IDs plus `deepseek/deepseek-v4-pro` | Reconciler restores stale values from its internal state; OpenRouter sync only updates canonical IDs when available |
 
 When the keeper makes changes, it also:
 1. Deletes `workspace/openclaw.json.bak` — prevents observe-recovery from reverting the fix
@@ -420,7 +415,7 @@ When the keeper makes changes, it also:
 | `agents.defaults.model.primary` | `HICLAW_DEFAULT_MODEL` |
 | `agents.defaults.models` | Rebuilt from full model list |
 | `agents.defaults.memorySearch` | `HICLAW_EMBEDDING_MODEL` and `HICLAW_AI_GATEWAY_URL` |
-| `commands` | Keeper-enforced `{"restart": true}` matching the startup baseline |
+| `commands.restart` | Removed with `del(.commands.restart)` before launch; keeper clears it if it reappears |
 
 After the OpenRouter sync, the startup script immediately pushes the updated `openclaw.json` to MinIO so the background MinIO-to-Local sync loop (which starts a few seconds later) does not overwrite the fresh values with stale MinIO data.
 
@@ -556,7 +551,7 @@ This file is OpenClaw's config-health baseline. It records the hash, byte count,
 
 `manager-config-keeper.sh` updates this file atomically whenever it writes `openclaw.json`. If `config-health.json` is not updated to match a keeper-written `openclaw.json`, observe-recovery will flag the keeper's version as unexpected and revert it within minutes.
 
-`start-manager-agent.sh` deletes `config-health.json` entirely at startup so the gateway establishes a fresh baseline from the startup-patched `openclaw.json`. This ensures the startup script's changes (Matrix token, model metadata, `commands.restart`) become the new baseline rather than being reverted.
+`start-manager-agent.sh` deletes `config-health.json` entirely at startup so the gateway establishes a fresh baseline from the startup-patched `openclaw.json`. This ensures the startup script's changes (Matrix token, model metadata, and command cleanup) become the new baseline rather than being reverted.
 
 ---
 
@@ -604,6 +599,6 @@ bash /worksp/hiclaw/mcp-keeper.sh
 
 - **ClawTalk API key is hardcoded** in `manager-config-keeper.sh` (`cc_live_d5a5025bc0dc6894ac8acc6f867b336667e3e104`). It belongs in an env var or secret store. Accepted for a single-deployment host-ops layer.
 - **`fix-element-config.sh` hardcodes the gateway key** in the nginx `manager-console.conf` sub_filter for auto-login. The key is already in the manager container's environment — the hardcoded value is a convenience for the one-off repair script only.
-- **OpenRouter model sync is partial.** Only `deepseek/deepseek-v4-pro` has a matching OpenRouter model ID and receives live context window values. All Higress gateway alias IDs (`gpt-5.4`, `claude-opus-4-6`, etc.) have no OpenRouter equivalent and keep static values from `known-models.json`.
+- **OpenRouter model sync is partial.** Startup attempts to map gateway aliases to canonical OpenRouter IDs before syncing metadata, but the live config can still contain alias IDs after reconciler drift. `manager-config-keeper.sh` enforces static context-window values for all current aliases.
 - **`gateway.controlUi.dangerouslyDisableDeviceAuth = true`** and **`allowInsecureAuth = true`** are required for the auto-login token injection to work. These flags are acceptable on a server gated by Google OAuth at the Traefik layer, but they should not be present in a multi-user deployment.
 - **`oauth2-proxy/.env` contains real credentials on the server** and is ignored by git. Rotate credentials by updating this file and restarting the container.

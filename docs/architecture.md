@@ -202,7 +202,7 @@ For browser automation tasks, the agent additionally:
 ```
 Writer 1: hiclaw-controller ManagerReconciler
   - Runs every ~47 seconds
-  - Writes its template values (model list, commands.restart=true, channels config)
+  - Writes its template values (model list, commands field, channels config)
   - Can write invalid schema (channels.matrix.groups.*.allow instead of .enabled)
   - Can write null for fields the manager added (YOLO settings, tool config)
 
@@ -217,14 +217,14 @@ Writer 3: manager-config-keeper.sh (host cron, every ~60s)
   - Atomic write to prevent partial-read by the gateway file watcher
 
 Flow on a typical reconciler cycle:
-  1. Reconciler writes openclaw.json with commands.restart=true, allow keys, possibly bad model data
-  2. Gateway file watcher fires → SIGUSR1 → in-process restart (due to commands change)
-  3. keeper runs: normalizes allow→enabled, restores commands to {"restart": true}, updates config-health.json
+  1. Reconciler writes openclaw.json with allow keys, wildcard groups, possibly bad model data, and commands drift
+  2. Gateway file watcher fires and evaluates the config
+  3. keeper runs: normalizes allow→enabled, removes wildcard groups, clears commands.restart if present, updates config-health.json
   4. Gateway file watcher fires again → hot reload only (no restart, no SIGUSR1)
 ```
 
-**Why `commands.restart` must stay true:**
-The gateway diffs live config changes against the startup baseline recorded in `config-health.json`. In the current stable state, that baseline expects `commands.restart=true`. The controller reconciler periodically writes `commands:null`; the keeper writes `{"restart": true}` back so the next diff matches the baseline and does not trigger a restart loop.
+**Why `commands.restart` must not persist:**
+The gateway diffs live config changes against the startup baseline recorded in `config-health.json`. In the current stable state, `start-manager-agent.sh` deletes `commands.restart` before launch and `manager-config-keeper.sh` clears it if it reappears. Persisting a restart command can turn routine reconciler/config writes into recurring SIGUSR1 restarts.
 
 ### 5.3 Manager startup sequence
 
@@ -240,7 +240,7 @@ On every container start, `start-manager-agent.sh` runs as the container entrypo
 8. **openclaw.json update** — jq merge of known models, model metadata sync from OpenRouter, Matrix token update, schema migrations, `del(.pricing)` cleanup, push back to MinIO
 9. **OpenRouter model sync** — writes API response to `/tmp/openrouter-models.json` (file, not variable, to avoid arg-length limits), updates contextWindow/maxTokens for matching models
 10. **MinIO push** — immediately pushes updated `openclaw.json` to MinIO to prevent background sync from overwriting fresh values
-11. **ClawTalk bootstrap** — patches plugin manifest, creates bundled shim at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`, clears `installs.json`
+11. **ClawTalk bootstrap** — patches plugin manifest, writes the host-backed bundled shim at `/root/manager-workspace/.openclaw/bundled-extensions/clawtalk/`, symlinks `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/` to it, clears `installs.json`
 12. **WhatsApp bootstrap** — installs `@openclaw/whatsapp` if absent, ensures config entries
 13. **Fake systemd-run install** — writes `/usr/local/bin/systemd-run` wrapper
 14. **openclaw validation** — checks npm-installed openclaw for `json5/package.json` AND `openai/index.mjs`; removes broken install and falls back to `/opt/openclaw/` if either is missing
@@ -384,9 +384,9 @@ Built into OpenClaw. Configured via `channels.matrix` in `openclaw.json`:
 - **npm package:** `/root/manager-workspace/.openclaw/npm/node_modules/clawtalk/`
 - **Problem:** `build/index.js` is an ES module; OpenClaw uses CJS `require()`
 - **Fix:** `start-manager-agent.sh` creates a CJS wrapper `index.cjs` that does `const m = require('./build/index.js'); module.exports = m.default || m;` and updates `package.json` to point at `index.cjs`
-- **Bundled shim:** also created at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/` on every startup
+- **Host-backed bundled shim:** created at `/root/manager-workspace/.openclaw/bundled-extensions/clawtalk/`; `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/` is a startup-created symlink to this workspace path
 - **installs.json:** deleted on every startup so OpenClaw rescans and finds the shim; without deletion the cached registry predates the shim and reports "plugin not found"
-- **This fix is ephemeral** — lives inside the container overlay and is lost on restart; `start-manager-agent.sh` recreates it on every start
+- **Durability:** shim contents live in the host-mounted workspace; only the `/usr/lib/.../extensions/clawtalk` symlink is recreated inside the container overlay on startup
 
 ### whatsapp plugin
 
@@ -439,9 +439,9 @@ The controller's reconciler pushes the workspace to MinIO. Because the manager's
 
 `cdp_proxy.py` is bind-mounted into `novnc-desktop`. Docker bind mounts track the inode, not the path. Replacing the file (using Write tool, `cp`, or `mv`) creates a new inode; the container continues reading from the original inode and never sees the update. Always edit using the Edit tool (in-place modification) or `sed -i`.
 
-### commands.restart baseline must stay true
+### commands.restart must not persist
 
-The gateway records its startup config as the baseline in `config-health.json` and triggers SIGUSR1 on any diff against that baseline. The current stable baseline expects `commands.restart=true`. The controller reconciler can write `commands:null`; if that value persists, the next diff triggers a restart loop. `manager-config-keeper.sh` restores `commands` to `{"restart": true}` so live config matches the baseline.
+The gateway records its startup config as the baseline in `config-health.json` and triggers SIGUSR1 on diffs that require restart. The current startup script deletes `commands.restart` before launch, and the config keeper removes it if present. This keeps routine reconciler/config writes from being interpreted as restart signals.
 
 ### YOLO settings removed from startup config
 
@@ -468,8 +468,8 @@ The `loginToken` URL parameter creates a new Matrix device on every use, trigger
 - MinIO data model and reconciliation logic
 
 **Ephemeral (in-container, lost on restart, recreated by startup scripts):**
-- clawtalk `index.cjs` wrapper
+- clawtalk package manifest wrapper inside the npm package, recreated by startup if needed
 - Fake `/usr/local/bin/systemd-run`
 - `/usr/local/bin/openclaw` symlink
-- ClawTalk bundled shim at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/`
+- ClawTalk bundled shim symlink at `/usr/lib/node_modules/openclaw/dist/extensions/clawtalk/` (points to host-backed workspace content)
 - Element Web `config.json`, all injected JS files, nginx configs (regenerated by `start-element-web.sh`)
