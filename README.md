@@ -47,3 +47,4 @@ sudo crontab -u ai -l
 - [docs/configuration.md](docs/configuration.md) — all env vars and config files
 - [docs/development.md](docs/development.md) — debugging and safe edit workflows
 - [docs/deployment.md](docs/deployment.md) — deploy, upgrade, and recovery procedures
+- [docs/1password.md](docs/1password.md) — pulling secrets from 1Password (MCP server + `op` CLI)
